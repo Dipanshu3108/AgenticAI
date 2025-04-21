@@ -6,13 +6,10 @@ import json
 import pandas as pd
 from PIL import Image
 import google.generativeai as genai
-from io import StringIO, BytesIO
+from io import StringIO
 import base64
-import uuid
 import tempfile
-import shutil
-import zipfile
-import requests
+import uuid
 # --- Import local modules ---
 from getImages import screenshot_tables
 from amazonTables import amazon_tables
@@ -24,6 +21,11 @@ if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_API_KEY":
 else:
     ai_enabled = True
     genai.configure(api_key=GEMINI_API_KEY) 
+    
+def create_temp_extraction_dir():
+    """Creates a temporary directory for extraction and returns the path"""
+    temp_dir = tempfile.mkdtemp(prefix="streamlit_extraction_")
+    return temp_dir
 
 # --- Page Setup ---
 st.set_page_config(page_title="Web Table Extractor", layout="wide")
@@ -145,73 +147,49 @@ if st.button(button_text, key="main_action_button", disabled=not url):
             # Handle any images in the table
             if table_data["has_images"]:
                 status.text("Processing images in the Amazon table...")
+                # Extract and save images
+                image_dir = "extracted_images"
+                os.makedirs(image_dir, exist_ok=True)
                 
-                # Create a temporary directory for images
-                with tempfile.TemporaryDirectory() as temp_image_dir:
-                    # Process DataFrame to download images and update image paths
-                    processed_df = df.copy()
-                    image_paths = []  # Track image paths for zip creation
-                    
-                    for i, row in df.iterrows():
-                        for col in df.columns:
-                            cell_val = str(row[col])
-                            if "<img src=" in cell_val:
-                                # Extract image URL
-                                img_url_match = re.search(r'src="([^"]+)"', cell_val)
-                                if img_url_match:
-                                    img_url = img_url_match.group(1)
-                                    img_filename = f"{temp_image_dir}/amazon_img_{uuid.uuid4().hex[:8]}.jpg"
-                                    
-                                    try:
-                                        img_response = requests.get(img_url, stream=True, timeout=10)
-                                        if img_response.status_code == 200:
-                                            with open(img_filename, 'wb') as img_file:
-                                                img_file.write(img_response.content)
-                                            # Replace image URL with local path in DataFrame
-                                            processed_df.at[i, col] = f"Image: {img_filename}"
-                                            image_paths.append(img_filename)
-                                    except Exception as img_err:
-                                        print(f"Error downloading image {img_url}: {img_err}")
-                                        processed_df.at[i, col] = f"Image URL: {img_url} (download failed)"
-                    
-                    # Update the table data with processed dataframe
-                    table_data["dataframe_with_local_images"] = processed_df
-                    
-                    # Update content based on format with local image paths
-                    if format_type == "CSV":
-                        table_data["content_with_local_images"] = processed_df.to_csv(index=False)
-                    elif format_type == "JSON":
-                        table_data["content_with_local_images"] = processed_df.to_json(orient="records", indent=2)
-                    else:  # HTML
-                        # Create HTML with local image paths
-                        local_html = processed_df.to_html(escape=False, index=False)
-                        table_data["content_with_local_images"] = f"<html><head><meta charset='UTF-8'><title>Amazon Comparison</title></head><body>\n{local_html}\n</body></html>"
-                    
-                    # Create a ZIP file with all content and images
-                    zip_buffer = BytesIO()
-                    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                        # Add the main content file
-                        zipf.writestr(table_data['filename'], table_data['content'])
-                        
-                        # Add the content with local image references
-                        local_filename = table_data['filename'].replace(".", "_with_local_refs.")
-                        zipf.writestr(local_filename, table_data['content_with_local_images'])
-                        
-                        # Add all the images
-                        for img_path in image_paths:
-                            if os.path.exists(img_path):
-                                arcname = os.path.basename(img_path)
-                                zipf.write(img_path, f"images/{arcname}")
-                    
-                    # Store the zip content for download
-                    zip_buffer.seek(0)
-                    table_data["zip_content"] = zip_buffer.getvalue()
-                    table_data["zip_filename"] = "amazon_comparison_with_images.zip"
+                # Process DataFrame to download images and update image paths
+                processed_df = df.copy()
+                for i, row in df.iterrows():
+                    for col in df.columns:
+                        cell_val = str(row[col])
+                        if "<img src=" in cell_val:
+                            # Extract image URL
+                            img_url_match = re.search(r'src="([^"]+)"', cell_val)
+                            if img_url_match:
+                                img_url = img_url_match.group(1)
+                                img_filename = f"{image_dir}/amazon_img_{uuid.uuid4().hex[:8]}.jpg"
+                                
+                                try:
+                                    import requests
+                                    img_response = requests.get(img_url, stream=True, timeout=10)
+                                    if img_response.status_code == 200:
+                                        with open(img_filename, 'wb') as img_file:
+                                            img_file.write(img_response.content)
+                                        # Replace image URL with local path in DataFrame
+                                        processed_df.at[i, col] = f"Image: {img_filename}"
+                                except Exception as img_err:
+                                    print(f"Error downloading image {img_url}: {img_err}")
+                                    processed_df.at[i, col] = f"Image URL: {img_url} (download failed)"
                 
-                # After exiting the with block, the temp directory is automatically cleaned up
-            
-            # Update the table in session state
-            st.session_state.extracted_tables[-1] = table_data
+                # Update the table data with processed dataframe
+                table_data["dataframe_with_local_images"] = processed_df
+                
+                # Update content based on format with local image paths
+                if format_type == "CSV":
+                    table_data["content_with_local_images"] = processed_df.to_csv(index=False)
+                elif format_type == "JSON":
+                    table_data["content_with_local_images"] = processed_df.to_json(orient="records", indent=2)
+                else:  # HTML
+                    # Create HTML with local image paths
+                    local_html = processed_df.to_html(escape=False, index=False)
+                    table_data["content_with_local_images"] = f"<html><head><meta charset='UTF-8'><title>Amazon Comparison</title></head><body>\n{local_html}\n</body></html>"
+                
+                # Update the table in session state
+                st.session_state.extracted_tables[-1] = table_data
             
             progress.progress(100)
             st.rerun()  # Rerun to show results
@@ -234,214 +212,127 @@ if st.button(button_text, key="main_action_button", disabled=not url):
             domain_name = re.sub(r'^https?://(www\.)?', '', url).split('/')[0]
             safe_domain = re.sub(r'[^\w\s-]', '', domain_name).strip().replace('.', '_')
             
-            # Create a temporary directory for screenshots
-            with tempfile.TemporaryDirectory() as temp_screenshot_dir:
-                # Get all tables from the page, using the temp directory for screenshots
-                tables_info = screenshot_tables(url)
+            # Get all tables from the page
+            tables_info = screenshot_tables(url)
+            
+            if not tables_info or len(tables_info) == 0:
+                status.warning("No tables found on the webpage.")
+                progress.progress(100)
+                st.warning("No tables were detected on the provided webpage. Try a different URL.")
+                st.stop()
+            
+            status.text(f"Found {len(tables_info)} tables on the webpage. Processing...")
+            progress.progress(30)
+            
+            # Process each table
+            for idx, table_info in enumerate(tables_info):
+                progress_value = 30 + int(60 * (idx + 1) / len(tables_info))
+                progress.progress(progress_value)
+                status.text(f"Processing table {idx+1} of {len(tables_info)}...")
                 
-                if not tables_info or len(tables_info) == 0:
-                    status.warning("No tables found on the webpage.")
-                    progress.progress(100)
-                    st.warning("No tables were detected on the provided webpage. Try a different URL.")
-                    st.stop()
+                table_title = table_info.get("title", f"Table {idx+1}")
+                safe_title = re.sub(r'[^\w\s-]', '', table_title).strip().replace(' ', '_')
                 
-                status.text(f"Found {len(tables_info)} tables on the webpage. Processing...")
-                progress.progress(30)
+                if not safe_title:
+                    safe_title = f"table_{idx+1}"
                 
-                # Process each table
-                for idx, table_info in enumerate(tables_info):
-                    progress_value = 30 + int(60 * (idx + 1) / len(tables_info))
-                    progress.progress(progress_value)
-                    status.text(f"Processing table {idx+1} of {len(tables_info)}...")
+                # For each table, store screenshot if available
+                screenshot_path = table_info.get("screenshot", "")
+                if screenshot_path and os.path.exists(screenshot_path):
+                    st.session_state.screenshot_filenames.append(screenshot_path)
+                
+                # Process the table data
+                df = table_info.get("dataframe")
+                if df is not None:
+                    # Check for images in the dataframe
+                    has_images = any("<img src=" in str(cell) for row in df.values for cell in row)
                     
-                    table_title = table_info.get("title", f"Table {idx+1}")
-                    safe_title = re.sub(r'[^\w\s-]', '', table_title).strip().replace(' ', '_')
+                    # Prepare table data
+                    table_data = {
+                        "title": table_title,
+                        "dataframe": df,
+                        "html": table_info.get("html", ""),
+                        "source_url": url,
+                        "has_images": has_images,
+                        "screenshot": screenshot_path
+                    }
                     
-                    if not safe_title:
-                        safe_title = f"table_{idx+1}"
-                    
-                    # For each table, store screenshot path if available
-                    screenshot_path = table_info.get("screenshot", "")
-                    if screenshot_path and os.path.exists(screenshot_path):
-                        st.session_state.screenshot_filenames.append(screenshot_path)
-                    
-                    # Process the table data
-                    df = table_info.get("dataframe")
-                    if df is not None:
-                        # Check for images in the dataframe
-                        has_images = any("<img src=" in str(cell) for row in df.values for cell in row)
+                    # Handle any images in the table
+                    if has_images:
+                        image_dir = "extracted_images"
+                        os.makedirs(image_dir, exist_ok=True)
                         
-                        # Prepare table data
-                        table_data = {
-                            "title": table_title,
-                            "dataframe": df,
-                            "html": table_info.get("html", ""),
-                            "source_url": url,
-                            "has_images": has_images,
-                            "screenshot": screenshot_path
-                        }
+                        # Process DataFrame to download images and update image paths
+                        processed_df = df.copy()
+                        for i, row in df.iterrows():
+                            for col in df.columns:
+                                cell_val = str(row[col])
+                                if "<img src=" in cell_val:
+                                    # Extract image URL
+                                    img_url_match = re.search(r'src="([^"]+)"', cell_val)
+                                    if img_url_match:
+                                        img_url = img_url_match.group(1)
+                                        img_filename = f"{image_dir}/{safe_domain}_{safe_title}_img_{uuid.uuid4().hex[:8]}.jpg"
+                                        
+                                        try:
+                                            import requests
+                                            img_response = requests.get(img_url, stream=True, timeout=10)
+                                            if img_response.status_code == 200:
+                                                with open(img_filename, 'wb') as img_file:
+                                                    img_file.write(img_response.content)
+                                                # Replace image URL with local path in DataFrame
+                                                processed_df.at[i, col] = f"Image: {img_filename}"
+                                        except Exception as img_err:
+                                            print(f"Error downloading image {img_url}: {img_err}")
+                                            processed_df.at[i, col] = f"Image URL: {img_url} (download failed)"
                         
-                        # Handle any images in the table
+                        # Update the table data with processed dataframe
+                        table_data["dataframe_with_local_images"] = processed_df
+                    
+                    # Format table data
+                    filename_base = f"{safe_domain}_{safe_title}_{extraction_id}"
+                    if format_type == "CSV":
+                        table_data["content"] = df.to_csv(index=False)
+                        table_data["format"] = "CSV"
+                        table_data["filename"] = f"{filename_base}.csv"
+                        
                         if has_images:
-                            # Create a temporary directory for images
-                            with tempfile.TemporaryDirectory() as temp_image_dir:
-                                # Process DataFrame to download images and update image paths
-                                processed_df = df.copy()
-                                image_paths = []  # Track image paths for zip creation
-                                
-                                for i, row in df.iterrows():
-                                    for col in df.columns:
-                                        cell_val = str(row[col])
-                                        if "<img src=" in cell_val:
-                                            # Extract image URL
-                                            img_url_match = re.search(r'src="([^"]+)"', cell_val)
-                                            if img_url_match:
-                                                img_url = img_url_match.group(1)
-                                                img_filename = f"{temp_image_dir}/{safe_domain}_{safe_title}_img_{uuid.uuid4().hex[:8]}.jpg"
-                                                
-                                                try:
-                                                    img_response = requests.get(img_url, stream=True, timeout=10)
-                                                    if img_response.status_code == 200:
-                                                        with open(img_filename, 'wb') as img_file:
-                                                            img_file.write(img_response.content)
-                                                        # Replace image URL with local path in DataFrame
-                                                        processed_df.at[i, col] = f"Image: {img_filename}"
-                                                        image_paths.append(img_filename)
-                                                except Exception as img_err:
-                                                    print(f"Error downloading image {img_url}: {img_err}")
-                                                    processed_df.at[i, col] = f"Image URL: {img_url} (download failed)"
-                                
-                                # Update the table data with processed dataframe
-                                table_data["dataframe_with_local_images"] = processed_df
-                                
-                                # Format table data
-                                filename_base = f"{safe_domain}_{safe_title}_{extraction_id}"
-                                if format_type == "CSV":
-                                    table_data["content"] = df.to_csv(index=False)
-                                    table_data["format"] = "CSV"
-                                    table_data["filename"] = f"{filename_base}.csv"
-                                    table_data["content_with_local_images"] = processed_df.to_csv(index=False)
-                                
-                                elif format_type == "JSON":
-                                    table_data["content"] = df.to_json(orient="records", indent=2)
-                                    table_data["format"] = "JSON"
-                                    table_data["filename"] = f"{filename_base}.json"
-                                    table_data["content_with_local_images"] = processed_df.to_json(orient="records", indent=2)
-                                
-                                else:  # HTML
-                                    table_html = table_info.get("html", df.to_html(escape=False, index=False))
-                                    table_data["content"] = f"<html><head><meta charset='UTF-8'><title>{table_title}</title></head><body>\n{table_html}\n</body></html>"
-                                    table_data["format"] = "HTML"
-                                    table_data["filename"] = f"{filename_base}.html"
-                                    
-                                    # Create HTML with local image paths
-                                    local_html = processed_df.to_html(escape=False, index=False)
-                                    table_data["content_with_local_images"] = f"<html><head><meta charset='UTF-8'><title>{table_title}</title></head><body>\n{local_html}\n</body></html>"
-                                
-                                # Create a ZIP file with all content and images
-                                zip_buffer = BytesIO()
-                                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                                    # Add the main content file
-                                    zipf.writestr(table_data['filename'], table_data['content'])
-                                    
-                                    # Add the content with local image references
-                                    local_filename = table_data['filename'].replace(".", "_with_local_refs.")
-                                    zipf.writestr(local_filename, table_data['content_with_local_images'])
-                                    
-                                    # Add all the images
-                                    for img_path in image_paths:
-                                        if os.path.exists(img_path):
-                                            arcname = os.path.basename(img_path)
-                                            zipf.write(img_path, f"images/{arcname}")
-                                    
-                                    # Add screenshot if available
-                                    if screenshot_path and os.path.exists(screenshot_path):
-                                        arcname = os.path.basename(screenshot_path)
-                                        zipf.write(screenshot_path, f"screenshots/{arcname}")
-                                
-                                # Store the zip content for download
-                                zip_buffer.seek(0)
-                                table_data["zip_content"] = zip_buffer.getvalue()
-                                table_data["zip_filename"] = f"{filename_base}_with_images.zip"
-                            
-                            # After exiting the with block, the temp directory is automatically cleaned up
-                        else:
-                            # No images - simpler format for table data
-                            filename_base = f"{safe_domain}_{safe_title}_{extraction_id}"
-                            if format_type == "CSV":
-                                table_data["content"] = df.to_csv(index=False)
-                                table_data["format"] = "CSV"
-                                table_data["filename"] = f"{filename_base}.csv"
-                            elif format_type == "JSON":
-                                table_data["content"] = df.to_json(orient="records", indent=2)
-                                table_data["format"] = "JSON"
-                                table_data["filename"] = f"{filename_base}.json"
-                            else:  # HTML
-                                table_html = table_info.get("html", df.to_html(escape=False, index=False))
-                                table_data["content"] = f"<html><head><meta charset='UTF-8'><title>{table_title}</title></head><body>\n{table_html}\n</body></html>"
-                                table_data["format"] = "HTML"
-                                table_data["filename"] = f"{filename_base}.html"
-                            
-                            # Create a ZIP with content and screenshot if available
-                            if screenshot_path and os.path.exists(screenshot_path):
-                                zip_buffer = BytesIO()
-                                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                                    # Add the main content file
-                                    zipf.writestr(table_data['filename'], table_data['content'])
-                                    
-                                    # Add screenshot
-                                    arcname = os.path.basename(screenshot_path)
-                                    zipf.write(screenshot_path, f"screenshots/{arcname}")
-                                
-                                # Store the zip content for download
-                                zip_buffer.seek(0)
-                                table_data["zip_content"] = zip_buffer.getvalue()
-                                table_data["zip_filename"] = f"{filename_base}_with_screenshot.zip"
-                        
-                        # Add to session state
-                        st.session_state.extracted_tables.append(table_data)
-                        st.session_state.extracted_formats.append(format_type)
-                        st.session_state.extracted_filenames.append(table_data["filename"])
-                
-                # Create a master ZIP with all tables and assets
-                if len(st.session_state.extracted_tables) > 0:
-                    # Create a master ZIP file with all content
-                    master_zip_buffer = BytesIO()
-                    with zipfile.ZipFile(master_zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                        # Add each table's content
-                        for idx, table_data in enumerate(st.session_state.extracted_tables):
-                            # Add the main content file to a subdirectory with the table index
-                            table_dir = f"table_{idx+1}"
-                            zipf.writestr(f"{table_dir}/{table_data['filename']}", table_data['content'])
-                            
-                            # If there's content with local image references, add that too
-                            if "content_with_local_images" in table_data:
-                                local_filename = table_data['filename'].replace(".", "_with_local_refs.")
-                                zipf.writestr(f"{table_dir}/{local_filename}", table_data['content_with_local_images'])
-                            
-                            # Add screenshot if available
-                            screenshot_path = table_data.get("screenshot", "")
-                            if screenshot_path and os.path.exists(screenshot_path):
-                                arcname = os.path.basename(screenshot_path)
-                                zipf.write(screenshot_path, f"{table_dir}/screenshots/{arcname}")
+                            table_data["content_with_local_images"] = processed_df.to_csv(index=False)
                     
-                    # Store the master zip for download
-                    master_zip_buffer.seek(0)
+                    elif format_type == "JSON":
+                        table_data["content"] = df.to_json(orient="records", indent=2)
+                        table_data["format"] = "JSON"
+                        table_data["filename"] = f"{filename_base}.json"
+                        
+                        if has_images:
+                            table_data["content_with_local_images"] = processed_df.to_json(orient="records", indent=2)
+                    
+                    else:  # HTML
+                        table_html = table_info.get("html", df.to_html(escape=False, index=False))
+                        table_data["content"] = f"<html><head><meta charset='UTF-8'><title>{table_title}</title></head><body>\n{table_html}\n</body></html>"
+                        table_data["format"] = "HTML"
+                        table_data["filename"] = f"{filename_base}.html"
+                        
+                        if has_images:
+                            # Create HTML with local image paths
+                            local_html = processed_df.to_html(escape=False, index=False)
+                            table_data["content_with_local_images"] = f"<html><head><meta charset='UTF-8'><title>{table_title}</title></head><body>\n{local_html}\n</body></html>"
                     
                     # Add to session state
-                    st.session_state.master_zip_content = master_zip_buffer.getvalue()
-                    st.session_state.master_zip_filename = f"{safe_domain}_all_tables_{extraction_id}.zip"
-                
-                # Set flag that data was extracted successfully
-                if st.session_state.extracted_tables:
-                    st.session_state.data_extracted = True
-                    st.session_state.screenshot_captured = bool(st.session_state.screenshot_filenames)
-                    status.text(f"Successfully extracted {len(st.session_state.extracted_tables)} tables!")
-                else:
-                    status.warning("No tables could be extracted from the webpage.")
-                
-                progress.progress(100)
-                st.rerun()  # Show results
+                    st.session_state.extracted_tables.append(table_data)
+                    st.session_state.extracted_formats.append(format_type)
+                    st.session_state.extracted_filenames.append(table_data["filename"])
+            
+            # Set flag that data was extracted successfully
+            if st.session_state.extracted_tables:
+                st.session_state.data_extracted = True
+                st.session_state.screenshot_captured = bool(st.session_state.screenshot_filenames)
+                status.text(f"Successfully extracted {len(st.session_state.extracted_tables)} tables!")
+            else:
+                status.warning("No tables could be extracted from the webpage.")
+            
+            progress.progress(100)
+            st.rerun()  # Show results
             
         except Exception as e:
             st.error(f"An error occurred during table extraction: {str(e)}")
@@ -513,10 +404,9 @@ if st.session_state.data_extracted and st.session_state.extracted_tables:
     st.subheader("⬇️ Download Options")
     
     col1, col2 = st.columns(2)
-
+    
     with col1:
         try:
-            # Regular content download link
             download_link = get_download_link(
                 table_data['content'],
                 table_data['filename'],
@@ -526,7 +416,7 @@ if st.session_state.data_extracted and st.session_state.extracted_tables:
             st.markdown(download_link, unsafe_allow_html=True)
         except Exception as dl_error:
             st.error(f"Error generating download link: {dl_error}")
-
+    
     # Option to download version with local image paths if available
     if table_data.get("has_images") and "content_with_local_images" in table_data:
         with col2:
@@ -541,80 +431,48 @@ if st.session_state.data_extracted and st.session_state.extracted_tables:
                 st.markdown(download_link, unsafe_allow_html=True)
             except Exception as dl_error:
                 st.error(f"Error generating local images download link: {dl_error}")
-
-    # Center just the ZIP download button
-    if "zip_content" in table_data:
-        # Create three columns for centering - like a visual container
-        left_spacer, center_col, right_spacer = st.columns([1, 2, 1])
-        
-        # Place the button in the center column
-        with center_col:
-            st.download_button(
-                label=f"Download with Images/Screenshots (ZIP)",
-                data=table_data["zip_content"],
-                file_name=table_data["zip_filename"],
-                mime="application/zip",
-                use_container_width=True
-            )
-    
     
     # Option to download all tables as a zip
     if len(st.session_state.extracted_tables) > 1:
         st.markdown("---")
-        
-        # If we already have a master ZIP prepared, use it
-        if hasattr(st.session_state, 'master_zip_content') and st.session_state.master_zip_content:
-            st.download_button(
-                label=f"Download All Tables as ZIP",
-                data=st.session_state.master_zip_content,
-                file_name=st.session_state.master_zip_filename,
-                mime="application/zip",
-                use_container_width=True
-            )
-        else:
-            # Otherwise, create a new ZIP when requested
-            if st.button("Prepare ZIP file with all tables", use_container_width=True):
-                try:
-                    # Create a temporary directory to gather all files
-                    with tempfile.TemporaryDirectory() as temp_dir:
-                        # Create a BytesIO object to store the zip file
-                        zip_buffer = BytesIO()
+        if st.button("Prepare ZIP file with all tables", use_container_width=True):
+            try:
+                import zipfile
+                from io import BytesIO
+                
+                # Create a BytesIO object to store the zip file
+                zip_buffer = BytesIO()
+                
+                # Create a ZipFile object
+                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    # Add each table to the zip file
+                    for idx, table in enumerate(st.session_state.extracted_tables):
+                        filename = table['filename']
+                        content = table['content']
                         
-                        # Create a ZipFile object
-                        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                            # Add each table to the zip file
-                            for idx, table in enumerate(st.session_state.extracted_tables):
-                                table_dir = f"table_{idx+1}"
-                                
-                                # Add the main content
-                                zipf.writestr(f"{table_dir}/{table['filename']}", table['content'])
-                                
-                                # If there's a version with local image paths, add it too
-                                if table.get("has_images") and "content_with_local_images" in table:
-                                    local_img_filename = table['filename'].replace(".", "_local_images.")
-                                    zipf.writestr(f"{table_dir}/{local_img_filename}", table['content_with_local_images'])
-                                
-                                # Add screenshot if available
-                                screenshot_path = table.get("screenshot", "")
-                                if screenshot_path and os.path.exists(screenshot_path):
-                                    arcname = os.path.basename(screenshot_path)
-                                    zipf.write(screenshot_path, f"{table_dir}/screenshots/{arcname}")
+                        # Add the content to the zip file
+                        zipf.writestr(filename, content)
                         
-                        # Prepare the download link for the zip file
-                        zip_buffer.seek(0)
-                        domain_name = re.sub(r'^https?://(www\.)?', '', url).split('/')[0]
-                        safe_domain = re.sub(r'[^\w\s-]', '', domain_name).strip().replace('.', '_')
-                        zip_filename = f"{safe_domain}_all_tables.zip"
-                        
-                        st.download_button(
-                            label=f"Download All Tables as ZIP",
-                            data=zip_buffer,
-                            file_name=zip_filename,
-                            mime="application/zip",
-                            use_container_width=True
-                        )
-                except Exception as zip_error:
-                    st.error(f"Error creating ZIP file: {zip_error}")
+                        # If there's a version with local image paths, add it too
+                        if table.get("has_images") and "content_with_local_images" in table:
+                            local_img_filename = filename.replace(".", "_local_images.")
+                            zipf.writestr(local_img_filename, table['content_with_local_images'])
+                
+                # Prepare the download link for the zip file
+                zip_buffer.seek(0)
+                domain_name = re.sub(r'^https?://(www\.)?', '', url).split('/')[0]
+                safe_domain = re.sub(r'[^\w\s-]', '', domain_name).strip().replace('.', '_')
+                zip_filename = f"{safe_domain}_all_tables.zip"
+                
+                st.download_button(
+                    label=f"Download All Tables as ZIP",
+                    data=zip_buffer,
+                    file_name=zip_filename,
+                    mime="application/zip",
+                    use_container_width=True
+                )
+            except Exception as zip_error:
+                st.error(f"Error creating ZIP file: {zip_error}")
     
     # --- Q&A Section ---
     if ai_enabled:
