@@ -511,43 +511,40 @@ if st.session_state.data_extracted and st.session_state.extracted_tables:
     # Download links
     st.markdown("---")
     st.subheader("⬇️ Download Options")
-    left_col, _ = st.columns([1, 3])
-
-    with left_col:
-        try:
-            # 1. Regular content download link
+    try:
+        # 1. First download link
+        download_link = get_download_link(
+            table_data['content'],
+            table_data['filename'],
+            f"Download as {table_data['format']} ({table_data['filename']})",
+            table_data['format']
+        )
+        st.markdown(download_link, unsafe_allow_html=True)
+        
+        # 2. Second download link (if available)
+        if table_data.get("has_images") and "content_with_local_images" in table_data:
+            local_img_filename = table_data['filename'].replace(".", "_local_images.")
             download_link = get_download_link(
-                table_data['content'],
-                table_data['filename'],
-                f"Download as {table_data['format']} ({table_data['filename']})",
+                table_data['content_with_local_images'],
+                local_img_filename,
+                f"Download with local image paths ({local_img_filename})",
                 table_data['format']
             )
             st.markdown(download_link, unsafe_allow_html=True)
-            st.markdown("<br>", unsafe_allow_html=True)  # Spacer
-            
-            # 2. Option to download version with local image paths if available
-            if table_data.get("has_images") and "content_with_local_images" in table_data:
-                local_img_filename = table_data['filename'].replace(".", "_local_images.")
-                download_link = get_download_link(
-                    table_data['content_with_local_images'],
-                    local_img_filename,
-                    f"Download with local image paths ({local_img_filename})",
-                    table_data['format']
-                )
-                st.markdown(download_link, unsafe_allow_html=True)
-                st.markdown("<br>", unsafe_allow_html=True)  # Spacer
-            
-            # 3. ZIP download button if available
-            if "zip_content" in table_data:
+        
+        # 3. ZIP download button (make it smaller width)
+        if "zip_content" in table_data:
+            col1, col2 = st.columns([1, 4])
+            with col1:
                 st.download_button(
-                    label=f"Download with Images/Screenshots (ZIP)",
+                    label="Download with Images/Screenshots (ZIP)",
                     data=table_data["zip_content"],
                     file_name=table_data["zip_filename"],
                     mime="application/zip",
-                    use_container_width=True  # Fill the column width
+                    use_container_width=True
                 )
-        except Exception as dl_error:
-            st.error(f"Error generating download links: {dl_error}")
+    except Exception as dl_error:
+        st.error(f"Error generating download links: {dl_error}")
     # col1, col2 = st.columns(2)
 
     # with col1:
