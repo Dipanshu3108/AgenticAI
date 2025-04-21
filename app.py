@@ -534,7 +534,7 @@ if st.session_state.data_extracted and st.session_state.extracted_tables:
         
         # 3. ZIP download button (make it smaller width)
         if "zip_content" in table_data:
-            col1, col2 = st.columns(1)
+            col1, col2 = st.columns([1,1])
             with col1:
                 st.download_button(
                     label="Download with Images/Screenshots (ZIP)",
