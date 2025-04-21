@@ -525,6 +525,273 @@ def screenshot_table_element(driver, table_element, base_filename, idx=0):
         print(f"Error taking table screenshot: {e}")
         return None
 
+
+def extract_espn_table(driver, safe_domain):
+    """
+    Special handler specifically for ESPN standings tables
+    """
+    print("Attempting ESPN-specific table extraction...")
+    tables_info = []
+    
+    try:
+        # Look for ESPN's custom table containers
+        espn_selectors = [
+            ".Table__Scroller",
+            ".ResponsiveTable",
+            ".Wrapper .Table",
+            ".standings__table",
+            "[class*='Table']",
+            "[data-behavior='table_wrapper']"
+        ]
+        
+        # Find potential table containers
+        containers = []
+        for selector in espn_selectors:
+            try:
+                elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                if elements:
+                    print(f"Found {len(elements)} potential ESPN containers with {selector}")
+                    containers.extend(elements)
+            except Exception as e:
+                print(f"Error with selector {selector}: {e}")
+        
+        # Process each container
+        for idx, container in enumerate(containers):
+            try:
+                # Skip if not visible
+                if not container.is_displayed():
+                    continue
+                
+                # Try to get a title
+                title = f"Sports Table {idx+1}"
+                try:
+                    # Look for heading elements nearby
+                    heading_elements = driver.execute_script("""
+                        function findHeading(el) {
+                            // Check element itself
+                            const headers = el.querySelectorAll('h1, h2, h3, h4, h5, .Table__Title, .standings__caption');
+                            if (headers.length > 0) return headers[0].textContent.trim();
+                            
+                            // Check previous siblings
+                            let sibling = el.previousElementSibling;
+                            while (sibling) {
+                                if (sibling.tagName.match(/^H[1-6]$/) || 
+                                    sibling.className.includes('Title') || 
+                                    sibling.className.includes('Caption')) {
+                                    return sibling.textContent.trim();
+                                }
+                                sibling = sibling.previousElementSibling;
+                            }
+                            
+                            // Check parent
+                            if (el.parentElement) {
+                                const parentHeaders = el.parentElement.querySelectorAll('h1, h2, h3, h4, h5, .Title, .Caption');
+                                for (const h of parentHeaders) {
+                                    if (h.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) {
+                                        return h.textContent.trim();
+                                    }
+                                }
+                            }
+                            
+                            return null;
+                        }
+                        return findHeading(arguments[0]);
+                    """, container)
+                    
+                    if title and title.strip():
+                        title = title.strip()
+                except Exception as title_err:
+                    print(f"Error finding title: {title_err}")
+                
+                # Take a screenshot
+                screenshot_path = None
+                try:
+                    os.makedirs('screenshots', exist_ok=True)
+                    screenshot_path = f"screenshots/{safe_domain}_espn_{idx+1}.png"
+                    
+                    # Scroll to make visible
+                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", container)
+                    time.sleep(0.5)
+                    
+                    # Make sure the table is fully visible
+                    driver.execute_script("""
+                        arguments[0].style.overflow = 'visible';
+                        let parent = arguments[0].parentElement;
+                        for (let i = 0; i < 5 && parent; i++) {
+                            parent.style.overflow = 'visible';
+                            parent = parent.parentElement;
+                        }
+                    """, container)
+                    
+                    # Take screenshot
+                    container.screenshot(screenshot_path)
+                    print(f"ESPN table screenshot saved as {screenshot_path}")
+                except Exception as ss_err:
+                    print(f"Error taking screenshot: {ss_err}")
+                    # Try to take a full page screenshot as fallback
+                    try:
+                        screenshot_path = f"screenshots/{safe_domain}_espn_page_{idx+1}.png"
+                        driver.save_screenshot(screenshot_path)
+                    except:
+                        screenshot_path = None
+                
+                # Extract data using direct DOM traversal
+                headers = []
+                rows_data = []
+                
+                # Get HTML for parsing
+                container_html = container.get_attribute('outerHTML')
+                soup = BeautifulSoup(container_html, 'html.parser')
+                
+                # Try to find header row first
+                header_elems = soup.select('.Table__THEAD, [role="columnheader"], th, .header')
+                if header_elems:
+                    headers = [h.get_text(strip=True) for h in header_elems if h.get_text(strip=True)]
+                
+                # If no headers, try another approach with Selenium
+                if not headers:
+                    try:
+                        header_elements = container.find_elements(By.CSS_SELECTOR, 
+                            ".Table__THEAD *, th, [role='columnheader'], [class*='header'], div[class*='col-head']")
+                        
+                        if header_elements:
+                            headers = [h.text.strip() for h in header_elements if h.text.strip()]
+                    except:
+                        pass
+                
+                # Try to extract rows
+                # First with BeautifulSoup
+                row_elements = soup.select('.Table__TR, tr, [role="row"], .standings__row')
+                for row in row_elements:
+                    # Skip header rows
+                    if ('header' in row.get('class', '') or 
+                        row.name == 'thead' or 
+                        row.parent and row.parent.name == 'thead'):
+                        continue
+                        
+                    cells = row.select('td, th, .Table__TD, [role="cell"]') 
+                    if not cells:
+                        # Try to get direct child elements
+                        cells = [c for c in row.children if c.name]
+                    
+                    if cells:
+                        row_data = []
+                        for cell in cells:
+                            # Check for images
+                            img = cell.find('img')
+                            if img:
+                                img_src = img.get('src', '')
+                                cell_text = cell.get_text(strip=True)
+                                if img_src:
+                                    if cell_text:
+                                        row_data.append(f"{cell_text} <img src='{img_src}' style='max-width:20px; max-height:20px;'>")
+                                    else:
+                                        row_data.append(f"<img src='{img_src}' style='max-width:20px; max-height:20px;'>")
+                                else:
+                                    row_data.append(cell_text)
+                            else:
+                                row_data.append(cell.get_text(strip=True))
+                        
+                        # Only add non-empty rows
+                        if any(str(cell).strip() for cell in row_data):
+                            rows_data.append(row_data)
+                
+                # If we couldn't get rows with BeautifulSoup, try with Selenium
+                if not rows_data:
+                    try:
+                        selenium_rows = container.find_elements(By.CSS_SELECTOR, 
+                            "tr, .Table__TR, [role='row'], div[class*='row']:not([class*='header'])")
+                            
+                        for row_el in selenium_rows:
+                            cells = row_el.find_elements(By.CSS_SELECTOR, 
+                                "td, th, .Table__TD, [role='cell'], div[class*='col'], div[class*='cell']")
+                                
+                            row_data = []
+                            for cell in cells:
+                                # Check for images
+                                try:
+                                    img = cell.find_element(By.TAG_NAME, "img")
+                                    if img:
+                                        img_src = img.get_attribute("src")
+                                        cell_text = cell.text.strip()
+                                        if img_src:
+                                            if cell_text:
+                                                row_data.append(f"{cell_text} <img src='{img_src}' style='max-width:20px; max-height:20px;'>")
+                                            else:
+                                                row_data.append(f"<img src='{img_src}' style='max-width:20px; max-height:20px;'>")
+                                        else:
+                                            row_data.append(cell_text)
+                                    else:
+                                        row_data.append(cell.text.strip()) 
+                                except:
+                                    row_data.append(cell.text.strip())
+                            
+                            # Only add non-empty rows
+                            if any(str(cell).strip() for cell in row_data):
+                                rows_data.append(row_data)
+                    except Exception as row_err:
+                        print(f"Error extracting rows with Selenium: {row_err}")
+                
+                # Process the data if we have rows
+                if rows_data:
+                    # If no headers but we have rows, use first row or generate headers
+                    if not headers:
+                        # Check if first row looks like a header
+                        if any(header_text in ' '.join(rows_data[0]).lower() 
+                               for header_text in ["team", "pos", "gp", "w", "l", "pts"]):
+                            headers = rows_data[0]
+                            rows_data = rows_data[1:]
+                        else:
+                            # Generate generic headers
+                            max_cols = max(len(row) for row in rows_data)
+                            headers = [f"Column {i+1}" for i in range(max_cols)]
+                    
+                    # Normalize row lengths to match headers
+                    max_cols = len(headers)
+                    normalized_rows = []
+                    for row in rows_data:
+                        if len(row) < max_cols:
+                            # Pad with empty strings
+                            normalized_rows.append(row + [''] * (max_cols - len(row)))
+                        elif len(row) > max_cols:
+                            # Truncate
+                            normalized_rows.append(row[:max_cols])
+                        else:
+                            normalized_rows.append(row)
+                    
+                    # Create DataFrame
+                    if normalized_rows:
+                        df = pd.DataFrame(normalized_rows, columns=headers)
+                        
+                        # Create HTML representation
+                        html_content = df.to_html(escape=False, index=False)
+                        
+                        # Check for images
+                        has_images = any("<img" in str(cell) for row in df.values for cell in row)
+                        
+                        # Build table info dict
+                        table_data = {
+                            'title': title,
+                            'dataframe': df,
+                            'html': html_content,
+                            'screenshot': screenshot_path,
+                            'has_images': has_images,
+                            'source_url': driver.current_url
+                        }
+                        
+                        tables_info.append(table_data)
+                        print(f"Successfully extracted ESPN table: {title} with {len(df)} rows")
+            
+            except Exception as container_err:
+                print(f"Error processing ESPN container {idx}: {container_err}")
+        
+    except Exception as e:
+        print(f"Error in ESPN table extraction: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    return tables_info
+
 def screenshot_tables(url):
     """
     Find and extract all tables from a webpage
@@ -628,6 +895,12 @@ def screenshot_tables(url):
             except Exception as selector_err:
                 print(f"Error with selector {selector}: {selector_err}")
         
+        if not tables_info and ("espn.com" in url or "sports" in url.lower() or "standings" in url.lower() or "league" in url.lower()):
+            print("No standard tables found. Detected sports website - trying specialized ESPN extraction...")
+            espn_tables = extract_espn_table(driver, safe_domain)
+            if espn_tables:
+                tables_info.extend(espn_tables)
+                print(f"Added {len(espn_tables)} tables from specialized ESPN extraction")
         # If no tables found, try to use AI to extract from the entire page
         if not tables_info:
             print("No standard tables found. Taking a screenshot of the full page.")
