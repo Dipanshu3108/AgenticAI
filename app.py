@@ -235,21 +235,9 @@ if st.button(button_text, key="main_action_button", disabled=not url):
             safe_domain = re.sub(r'[^\w\s-]', '', domain_name).strip().replace('.', '_')
             
             # Create a temporary directory for screenshots
-            # with tempfile.TemporaryDirectory() as temp_screenshot_dir:
-            #     # Get all tables from the page, using the temp directory for screenshots
-            #     tables_info = screenshot_tables(url, screenshot_dir=temp_screenshot_dir)
-                
-            #     if not tables_info or len(tables_info) == 0:
-            #         status.warning("No tables found on the webpage.")
-            #         progress.progress(100)
-            #         st.warning("No tables were detected on the provided webpage. Try a different URL.")
-            #         st.stop()
-                
-            #     status.text(f"Found {len(tables_info)} tables on the webpage. Processing...")
-            #     progress.progress(30)
             with tempfile.TemporaryDirectory() as temp_screenshot_dir:
                 # Get all tables from the page, using the temp directory for screenshots
-                tables_info = screenshot_tables(url, screenshot_dir=temp_screenshot_dir)
+                tables_info = screenshot_tables(url)
                 
                 if not tables_info or len(tables_info) == 0:
                     status.warning("No tables found on the webpage.")

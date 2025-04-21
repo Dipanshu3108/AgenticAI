@@ -476,7 +476,7 @@ def get_div_table_data(div_element, driver):
         print(f"Error extracting div table data: {e}")
         return None
 
-def screenshot_table_element(driver, table_element, base_filename, idx=0, screenshot_dir='screenshots'):
+def screenshot_table_element(driver, table_element, base_filename, idx=0):
     """
     Take a screenshot of a specific table element
     Args:
@@ -484,13 +484,12 @@ def screenshot_table_element(driver, table_element, base_filename, idx=0, screen
         table_element: WebElement of the table to screenshot
         base_filename: Base filename to use for the screenshot
         idx: Index of the table (for multiple tables)
-        screenshot_dir: Directory to save screenshots
     Returns:
         str: Path to the screenshot file, or None if failed
     """
     try:
         # Create screenshots directory if it doesn't exist
-        os.makedirs(screenshot_dir, exist_ok=True)
+        os.makedirs('screenshots', exist_ok=True)
         
         # Scroll to the table element to make sure it's visible
         driver.execute_script("arguments[0].scrollIntoView({block: 'center', behavior: 'instant'});", table_element)
@@ -514,8 +513,8 @@ def screenshot_table_element(driver, table_element, base_filename, idx=0, screen
         """, table_element)
         time.sleep(0.5)
         
-        # Create screenshot filename using the provided directory
-        filename = f"{screenshot_dir}/{base_filename}_table_{idx}.png"
+        # Create screenshot filename
+        filename = f"screenshots/{base_filename}_table_{idx}.png"
         
         # Take the screenshot
         table_element.screenshot(filename)
@@ -526,61 +525,11 @@ def screenshot_table_element(driver, table_element, base_filename, idx=0, screen
         print(f"Error taking table screenshot: {e}")
         return None
 
-# def screenshot_table_element(driver, table_element, base_filename, idx=0):
-#     """
-#     Take a screenshot of a specific table element
-#     Args:
-#         driver: Selenium WebDriver instance
-#         table_element: WebElement of the table to screenshot
-#         base_filename: Base filename to use for the screenshot
-#         idx: Index of the table (for multiple tables)
-#     Returns:
-#         str: Path to the screenshot file, or None if failed
-#     """
-#     try:
-#         # Create screenshots directory if it doesn't exist
-#         os.makedirs('screenshots', exist_ok=True)
-        
-#         # Scroll to the table element to make sure it's visible
-#         driver.execute_script("arguments[0].scrollIntoView({block: 'center', behavior: 'instant'});", table_element)
-#         time.sleep(0.5)
-        
-#         # Try to ensure the whole table is visible
-#         driver.execute_script("""
-#             // Force table to be fully visible
-#             arguments[0].style.overflow = 'visible';
-            
-#             // If there are parent containers with overflow:hidden, fix them
-#             let parent = arguments[0].parentElement;
-#             for (let i = 0; i < 5 && parent; i++) {
-#                 if (window.getComputedStyle(parent).overflow === 'hidden' ||
-#                     window.getComputedStyle(parent).overflowX === 'hidden') {
-#                     parent.style.overflow = 'visible';
-#                     parent.style.overflowX = 'visible';
-#                 }
-#                 parent = parent.parentElement;
-#             }
-#         """, table_element)
-#         time.sleep(0.5)
-        
-#         # Create screenshot filename
-#         filename = f"screenshots/{base_filename}_table_{idx}.png"
-        
-#         # Take the screenshot
-#         table_element.screenshot(filename)
-#         print(f"Table screenshot saved as {filename}")
-#         return filename
-    
-#     except Exception as e:
-#         print(f"Error taking table screenshot: {e}")
-#         return None
-
-def screenshot_tables(url, screenshot_dir='screenshots'):
+def screenshot_tables(url):
     """
     Find and extract all tables from a webpage
     Args:
         url (str): The URL of the webpage
-        screenshot_dir (str): Directory to save screenshots (default: 'screenshots')
     Returns:
         list: List of dictionaries containing table data, each with:
              - 'title': Table title/caption
@@ -634,8 +583,8 @@ def screenshot_tables(url, screenshot_dir='screenshots'):
                 table_data = extract_table_data(table, driver)
                 
                 if table_data:
-                    # Take screenshot of the table - use the provided screenshot_dir
-                    screenshot = screenshot_table_element(driver, table, safe_domain, idx, screenshot_dir=screenshot_dir)
+                    # Take screenshot of the table
+                    screenshot = screenshot_table_element(driver, table, safe_domain, idx)
                     if screenshot:
                         table_data['screenshot'] = screenshot
                     
@@ -667,8 +616,8 @@ def screenshot_tables(url, screenshot_dir='screenshots'):
                         div_table_data = get_div_table_data(div_table, driver)
                         
                         if div_table_data:
-                            # Take screenshot - use the provided screenshot_dir
-                            screenshot = screenshot_table_element(driver, div_table, f"{safe_domain}_div", len(tables_info), screenshot_dir=screenshot_dir)
+                            # Take screenshot
+                            screenshot = screenshot_table_element(driver, div_table, f"{safe_domain}_div", len(tables_info))
                             if screenshot:
                                 div_table_data['screenshot'] = screenshot
                             
@@ -682,10 +631,12 @@ def screenshot_tables(url, screenshot_dir='screenshots'):
         # If no tables found, try to use AI to extract from the entire page
         if not tables_info:
             print("No standard tables found. Taking a screenshot of the full page.")
-            os.makedirs(screenshot_dir, exist_ok=True)
-            full_page_file = f"{screenshot_dir}/{safe_domain}_full_page.png"
+            os.makedirs('screenshots', exist_ok=True)
+            full_page_file = f"screenshots/{safe_domain}_full_page.png"
             driver.save_screenshot(full_page_file)
             print(f"Full page screenshot saved as {full_page_file}")
+            
+            # You might want to add AI-based extraction here in the future
         
         # Process table data to handle image URLs
         for table_data in tables_info:
@@ -716,8 +667,8 @@ def screenshot_tables(url, screenshot_dir='screenshots'):
         
         # Take screenshot of the entire page as a fallback
         try:
-            os.makedirs(screenshot_dir, exist_ok=True)
-            driver.save_screenshot(f"{screenshot_dir}/error_{safe_domain}.png")
+            os.makedirs('screenshots', exist_ok=True)
+            driver.save_screenshot(f"screenshots/error_{safe_domain}.png")
             print(f"Error occurred, full page screenshot saved")
         except:
             pass
@@ -726,158 +677,6 @@ def screenshot_tables(url, screenshot_dir='screenshots'):
     
     finally:
         driver.quit()
-# def screenshot_tables(url):
-#     """
-#     Find and extract all tables from a webpage
-#     Args:
-#         url (str): The URL of the webpage
-#     Returns:
-#         list: List of dictionaries containing table data, each with:
-#              - 'title': Table title/caption
-#              - 'dataframe': pandas DataFrame of the table data
-#              - 'html': HTML string of the table
-#              - 'screenshot': Path to screenshot image (if successful)
-#     """
-#     # Set up Chrome options for headless environment
-#     chrome_options = Options()
-#     chrome_options.add_argument("--headless")
-#     chrome_options.add_argument("--no-sandbox")
-#     chrome_options.add_argument("--disable-dev-shm-usage")
-#     chrome_options.add_argument("--disable-gpu")
-#     chrome_options.add_argument("--window-size=1920,1080")
-    
-#     # Initialize WebDriver
-#     driver = webdriver.Chrome(options=chrome_options)
-    
-#     tables_info = []
-#     safe_domain = "webpage"
-    
-#     try:
-#         # Load the webpage
-#         driver.get(url)
-#         print(f"Loaded page: {url}")
-        
-#         # Wait for the page to load
-#         time.sleep(3)
-        
-#         # Handle cookie consent overlays
-#         accept_cookies(driver)
-        
-#         # Create a safe base filename from the URL
-#         domain_name = re.sub(r'^https?://(www\.)?', '', url).split('/')[0]
-#         safe_domain = re.sub(r'[^\w\s-]', '', domain_name).strip().replace('.', '_')
-        
-#         # Find all HTML tables
-#         print("Looking for HTML tables...")
-#         tables = driver.find_elements(By.TAG_NAME, "table")
-#         print(f"Found {len(tables)} HTML tables")
-        
-#         # Process each HTML table
-#         for idx, table in enumerate(tables):
-#             try:
-#                 # Check if table is visible and has content
-#                 if not table.is_displayed():
-#                     print(f"Table {idx+1} is not displayed, skipping")
-#                     continue
-                
-#                 # Extract table data
-#                 table_data = extract_table_data(table, driver)
-                
-#                 if table_data:
-#                     # Take screenshot of the table
-#                     screenshot = screenshot_table_element(driver, table, safe_domain, idx)
-#                     if screenshot:
-#                         table_data['screenshot'] = screenshot
-                    
-#                     tables_info.append(table_data)
-#                     print(f"Successfully extracted table {idx+1}: {table_data['title']}")
-#             except Exception as table_err:
-#                 print(f"Error processing table {idx+1}: {table_err}")
-        
-#         # Now look for div-based tables
-#         print("Looking for div-based tables...")
-#         div_table_selectors = [
-#             "div.table", "div.datatable", "div.grid", "div.data-table",
-#             "div.standings", "div[role='table']", "div.table-responsive",
-#             "div[class*='table']", "div[class*='grid']"
-#         ]
-        
-#         for selector in div_table_selectors:
-#             try:
-#                 div_tables = driver.find_elements(By.CSS_SELECTOR, selector)
-#                 print(f"Found {len(div_tables)} potential div-based tables with selector: {selector}")
-                
-#                 for idx, div_table in enumerate(div_tables):
-#                     try:
-#                         # Check if this div is visible and likely a table
-#                         if not div_table.is_displayed():
-#                             continue
-                        
-#                         # Extract data from div-based table
-#                         div_table_data = get_div_table_data(div_table, driver)
-                        
-#                         if div_table_data:
-#                             # Take screenshot
-#                             screenshot = screenshot_table_element(driver, div_table, f"{safe_domain}_div", len(tables_info))
-#                             if screenshot:
-#                                 div_table_data['screenshot'] = screenshot
-                            
-#                             tables_info.append(div_table_data)
-#                             print(f"Successfully extracted div-based table: {div_table_data['title']}")
-#                     except Exception as div_err:
-#                         print(f"Error processing div-based table: {div_err}")
-#             except Exception as selector_err:
-#                 print(f"Error with selector {selector}: {selector_err}")
-        
-#         # If no tables found, try to use AI to extract from the entire page
-#         if not tables_info:
-#             print("No standard tables found. Taking a screenshot of the full page.")
-#             os.makedirs('screenshots', exist_ok=True)
-#             full_page_file = f"screenshots/{safe_domain}_full_page.png"
-#             driver.save_screenshot(full_page_file)
-#             print(f"Full page screenshot saved as {full_page_file}")
-            
-#             # You might want to add AI-based extraction here in the future
-        
-#         # Process table data to handle image URLs
-#         for table_data in tables_info:
-#             if 'dataframe' in table_data:
-#                 df = table_data['dataframe']
-#                 # Check if this table has images
-#                 has_images = False
-                
-#                 # Process each cell to find image tags
-#                 for i, row in df.iterrows():
-#                     for col in df.columns:
-#                         cell_val = str(row[col])
-#                         if '<img src=' in cell_val:
-#                             has_images = True
-#                             break
-#                     if has_images:
-#                         break
-                
-#                 table_data['has_images'] = has_images
-        
-#         print(f"Total tables extracted: {len(tables_info)}")
-#         return tables_info
-    
-#     except Exception as e:
-#         print(f"An error occurred while extracting tables: {e}")
-#         import traceback
-#         traceback.print_exc()
-        
-#         # Take screenshot of the entire page as a fallback
-#         try:
-#             os.makedirs('screenshots', exist_ok=True)
-#             driver.save_screenshot(f"screenshots/error_{safe_domain}.png")
-#             print(f"Error occurred, full page screenshot saved")
-#         except:
-#             pass
-            
-#         return []
-    
-#     finally:
-#         driver.quit()
 
 def download_table_images(table_data, base_dir="extracted_images"):
     """
