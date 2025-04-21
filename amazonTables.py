@@ -54,7 +54,17 @@ def amazon_tables(url):
         comparison_table = comparison_div.find("table") if comparison_div else None
         
         if not comparison_table:
-            comparison_table = soup.find("table", class_=re.compile(r'_product-comparison-.*comparisonTable'))
+            # Use more flexible pattern to match any table with "comparison" in its class
+            comparison_table = soup.find("table", class_=re.compile(r'.*comparison.*', re.IGNORECASE))
+            
+            # If still not found, look more broadly for tables within divs that might be comparison tables
+            if not comparison_table:
+                comparison_divs = soup.find_all("div", class_=re.compile(r'.*comparison.*', re.IGNORECASE))
+                for div in comparison_divs:
+                    potential_table = div.find("table")
+                    if potential_table:
+                        comparison_table = potential_table
+                        break
         
         if comparison_table:
             print("Comparison table found in HTML.")
@@ -228,7 +238,8 @@ def extract_amazon_table(table_element, table_title):
             for cell in tr.find_all(["td", "th"]):
                 img = cell.find("img")
                 if img:
-                    image_url = img.get("data-a-hires") or img.get("src") or ""
+                    # Try multiple possible image attributes in order of preference
+                    image_url = img.get("data-a-hires") or img.get("src") or img.get("data-src") or ""
                     row.append(f'<img src="{image_url}" style="max-width:50px; max-height:50px;">')
                 else:
                     cell_text = ' '.join(cell.get_text(strip=True).split())
@@ -285,18 +296,18 @@ def extract_amazon_table(table_element, table_title):
         print(f"Error extracting data from table '{table_title}': {e}")
         return None
 
-# For testing purposes
-if __name__ == "__main__":
-    # Example Amazon product URL
-    url = "https://www.amazon.com/dp/B09H1LZ21F"  # Replace with an actual Amazon product URL
-    result = amazon_tables(url)
+# # For testing purposes
+# if __name__ == "__main__":
+#     # Example Amazon product URL
+#     url = "https://www.amazon.com/dp/B09H1LZ21F"  # Replace with an actual Amazon product URL
+#     result = amazon_tables(url)
     
-    if result['status'] == 'success':
-        print("\nExtracted Tables:")
-        for idx, table in enumerate(result['tables']):
-            print(f"\nTable {idx+1}: {table['title']}")
-            print(f"Columns: {list(table['dataframe'].columns)}")
-            print(f"Rows: {len(table['dataframe'])}")
-            print(f"Sample data: {table['dataframe'].head(2)}")
-    else:
-        print(f"Extraction failed: {result['message']}")
+#     if result['status'] == 'success':
+#         print("\nExtracted Tables:")
+#         for idx, table in enumerate(result['tables']):
+#             print(f"\nTable {idx+1}: {table['title']}")
+#             print(f"Columns: {list(table['dataframe'].columns)}")
+#             print(f"Rows: {len(table['dataframe'])}")
+#             print(f"Sample data: {table['dataframe'].head(2)}")
+#     else:
+#         print(f"Extraction failed: {result['message']}")
