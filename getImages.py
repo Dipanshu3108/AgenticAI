@@ -1092,26 +1092,26 @@ def screenshot_table(url, table_title):
     finally:
         driver.quit()
 
-# # For testing purposes
-# if __name__ == "__main__":
-#     # Example usage
-#     url = "https://www.worldometers.info/world-population/"
-#     print(f"Extracting tables from {url}")
-#     tables = screenshot_tables(url)
-#     print(f"Extracted {len(tables)} tables")
+# For testing purposes
+if __name__ == "__main__":
+    # Example usage
+    url = "https://www.worldometers.info/world-population/"
+    print(f"Extracting tables from {url}")
+    tables = screenshot_tables(url)
+    print(f"Extracted {len(tables)} tables")
     
-#     # Print table information
-#     for i, table in enumerate(tables):
-#         print(f"\nTable {i+1}: {table['title']}")
-#         if 'dataframe' in table:
-#             print(f"Columns: {list(table['dataframe'].columns)}")
-#             print(f"Rows: {len(table['dataframe'])}")
-#         if 'screenshot' in table:
-#             print(f"Screenshot: {table['screenshot']}")
+    # Print table information
+    for i, table in enumerate(tables):
+        print(f"\nTable {i+1}: {table['title']}")
+        if 'dataframe' in table:
+            print(f"Columns: {list(table['dataframe'].columns)}")
+            print(f"Rows: {len(table['dataframe'])}")
+        if 'screenshot' in table:
+            print(f"Screenshot: {table['screenshot']}")
         
-#         # Process any images in the table
-#         if table.get('has_images', False):
-#             print("Table contains images - downloading...")
-#             processed_table = download_table_images(table)
-#             if 'dataframe_with_local_images' in processed_table:
-#                 print("Successfully processed images in table")
+        # Process any images in the table
+        if table.get('has_images', False):
+            print("Table contains images - downloading...")
+            processed_table = download_table_images(table)
+            if 'dataframe_with_local_images' in processed_table:
+                print("Successfully processed images in table")

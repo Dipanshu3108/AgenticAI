@@ -8,24 +8,19 @@ from PIL import Image
 import google.generativeai as genai
 from io import StringIO
 import base64
-import tempfile
+
 import uuid
 # --- Import local modules ---
 from getImages import screenshot_tables
 from amazonTables import amazon_tables
 
-GEMINI_API_KEY = os.getenv("API_KEY")  # Replace with your actual API key
+GEMINI_API_KEY = os.getenv("API_KEY") # Replace with your actual API key
 if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_API_KEY":
     st.warning("Gemini API Key not found or not set. Please set it. AI features will be disabled.", icon="⚠️")
     ai_enabled = False
 else:
     ai_enabled = True
     genai.configure(api_key=GEMINI_API_KEY) 
-    
-def create_temp_extraction_dir():
-    """Creates a temporary directory for extraction and returns the path"""
-    temp_dir = tempfile.mkdtemp(prefix="streamlit_extraction_")
-    return temp_dir
 
 # --- Page Setup ---
 st.set_page_config(page_title="Web Table Extractor", layout="wide")
@@ -492,7 +487,7 @@ if st.session_state.data_extracted and st.session_state.extracted_tables:
                 try:
                     with st.spinner("🧠 Thinking..."):
                         # Model should already be configured if ai_enabled is True
-                        model = genai.GenerativeModel('gemini-2.0-flash-lite')
+                        model = genai.GenerativeModel('gemini-1.5-flash')
                         qa_prompt = f"""Based *only* on the following table data, answer the user's question accurately. If the question cannot be answered from the provided data, state that clearly. Do not make up information.
                         If the question is unrelated to the table or extracted data reply with "UNRELATED: Question unrelated to table, Please ask a question related to the table".
                         Table Data ({table_data['format']} format):
