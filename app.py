@@ -512,45 +512,84 @@ if st.session_state.data_extracted and st.session_state.extracted_tables:
     st.markdown("---")
     st.subheader("⬇️ Download Options")
     
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        try:
-            # Regular content download link
+    # Create a 3-column layout with wider center column
+col1, center_col, col3 = st.columns([1, 2, 1])
+
+# Put all download options in the center column for visual centering
+with center_col:
+    try:
+        # Regular content download link
+        download_link = get_download_link(
+            table_data['content'],
+            table_data['filename'],
+            f"Download as {table_data['format']} ({table_data['filename']})",
+            table_data['format']
+        )
+        st.markdown(download_link, unsafe_allow_html=True)
+        
+        # If ZIP content is available, provide that download button
+        if "zip_content" in table_data:
+            st.download_button(
+                label=f"Download with Images/Screenshots (ZIP)",
+                data=table_data["zip_content"],
+                file_name=table_data["zip_filename"],
+                mime="application/zip",
+                use_container_width=True
+            )
+            
+        # Option to download version with local image paths if available
+        if table_data.get("has_images") and "content_with_local_images" in table_data:
+            st.markdown("<br>", unsafe_allow_html=True)  # Add a bit of spacing
+            local_img_filename = table_data['filename'].replace(".", "_local_images.")
             download_link = get_download_link(
-                table_data['content'],
-                table_data['filename'],
-                f"Download as {table_data['format']} ({table_data['filename']})",
+                table_data['content_with_local_images'],
+                local_img_filename,
+                f"Download with local image paths ({local_img_filename})",
                 table_data['format']
             )
             st.markdown(download_link, unsafe_allow_html=True)
-            
-            # If ZIP content is available, provide that download button
-            if "zip_content" in table_data:
-                st.download_button(
-                    label=f"Download with Images/Screenshots (ZIP)",
-                    data=table_data["zip_content"],
-                    file_name=table_data["zip_filename"],
-                    mime="application/zip",
-                    use_container_width=True
-                )
-        except Exception as dl_error:
-            st.error(f"Error generating download link: {dl_error}")
+    except Exception as dl_error:
+        st.error(f"Error generating download link: {dl_error}")
     
-    # Option to download version with local image paths if available
-    if table_data.get("has_images") and "content_with_local_images" in table_data:
-        with col2:
-            try:
-                local_img_filename = table_data['filename'].replace(".", "_local_images.")
-                download_link = get_download_link(
-                    table_data['content_with_local_images'],
-                    local_img_filename,
-                    f"Download with local image paths ({local_img_filename})",
-                    table_data['format']
-                )
-                st.markdown(download_link, unsafe_allow_html=True)
-            except Exception as dl_error:
-                st.error(f"Error generating local images download link: {dl_error}")
+    # col1, col2 = st.columns(2)
+    
+    # with col1:
+    #     try:
+    #         # Regular content download link
+    #         download_link = get_download_link(
+    #             table_data['content'],
+    #             table_data['filename'],
+    #             f"Download as {table_data['format']} ({table_data['filename']})",
+    #             table_data['format']
+    #         )
+    #         st.markdown(download_link, unsafe_allow_html=True)
+            
+    #         # If ZIP content is available, provide that download button
+    #         if "zip_content" in table_data:
+    #             st.download_button(
+    #                 label=f"Download with Images/Screenshots (ZIP)",
+    #                 data=table_data["zip_content"],
+    #                 file_name=table_data["zip_filename"],
+    #                 mime="application/zip",
+    #                 use_container_width=True
+    #             )
+    #     except Exception as dl_error:
+    #         st.error(f"Error generating download link: {dl_error}")
+    
+    # # Option to download version with local image paths if available
+    # if table_data.get("has_images") and "content_with_local_images" in table_data:
+    #     with col2:
+    #         try:
+    #             local_img_filename = table_data['filename'].replace(".", "_local_images.")
+    #             download_link = get_download_link(
+    #                 table_data['content_with_local_images'],
+    #                 local_img_filename,
+    #                 f"Download with local image paths ({local_img_filename})",
+    #                 table_data['format']
+    #             )
+    #             st.markdown(download_link, unsafe_allow_html=True)
+    #         except Exception as dl_error:
+    #             st.error(f"Error generating local images download link: {dl_error}")
     
     # Option to download all tables as a zip
     if len(st.session_state.extracted_tables) > 1:
