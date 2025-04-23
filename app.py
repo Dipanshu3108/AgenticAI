@@ -1,718 +1,1093 @@
-# app.py
-import streamlit as st
-import os
-import re
-import json
-import io
-import pandas as pd
-from PIL import Image
-import google.generativeai as genai
-from io import StringIO
-import base64
-from urllib.parse import urlparse, urljoin
-import requests
-import uuid
-import zipfile
+import sys
 import time
-from pathlib import Path
+import re
+import os
+import pandas as pd
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import StaleElementReferenceException, TimeoutException, NoSuchElementException
+from webdriver_manager.chrome import ChromeDriverManager
+import uuid
+from bs4 import BeautifulSoup
+import requests
 
-# --- Import local modules ---
-from getImages import screenshot_tables
-from amazonTables import amazon_tables
-
-GEMINI_API_KEY = os.getenv("API_KEY") # Replace with your actual API key
-if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_API_KEY":
-    st.warning("Gemini API Key not found or not set. Please set it. AI features will be disabled.", icon="⚠️")
-    ai_enabled = False
-else:
-    ai_enabled = True
-    genai.configure(api_key=GEMINI_API_KEY) 
-
-# --- Page Setup ---
-st.set_page_config(page_title="Web Table Extractor", layout="wide")
-st.title("🌐 Web Table Extractor")
-st.markdown("Extract data from all tables on webpages. Handles Amazon product comparisons directly, uses AI for others.")
-
-# Initialize session state variables
-if 'extraction_method' not in st.session_state:
-    st.session_state.extraction_method = None
-if 'data_extracted' not in st.session_state:
-    st.session_state.data_extracted = False
-if 'extracted_tables' not in st.session_state:
-    st.session_state.extracted_tables = []
-if 'extracted_formats' not in st.session_state:
-    st.session_state.extracted_formats = []
-if 'extracted_filenames' not in st.session_state:
-    st.session_state.extracted_filenames = []
-if 'screenshot_captured' not in st.session_state:
-    st.session_state.screenshot_captured = False
-if 'screenshot_filenames' not in st.session_state:
-    st.session_state.screenshot_filenames = []
-if 'selected_table_index' not in st.session_state:
-    st.session_state.selected_table_index = 0
-if 'downloaded_images' not in st.session_state:
-    st.session_state.downloaded_images = []
-
-def get_download_link(content, filename, text, format_type):
-    """Creates a download link for text content."""
-    if isinstance(content, bytes):
-        b64 = base64.b64encode(content).decode()
-    else:
-        b64 = base64.b64encode(str(content).encode('utf-8')).decode() # Ensure UTF-8
-    mime_type = {
-        "CSV": "text/csv",
-        "JSON": "application/json",
-        "HTML": "text/html",
-        "TEXT": "text/plain"
-    }.get(format_type, "application/octet-stream")
-    href = f'<a href="data:{mime_type};base64,{b64}" download="{filename}">{text}</a>'
-    return href
-
-def extract_image_url(cell_val):
-    """Extract image URL from HTML cell value using multiple patterns."""
-    # First, try to match standard img tag pattern with various quote styles
-    img_url_match = re.search(r'<img[^>]*?src=[\'"]([^\'"]+)[\'"]', cell_val)
-    if img_url_match:
-        return img_url_match.group(1)
-    
-    # Try to match data-src or data-a-hires (common in Amazon)
-    img_url_match = re.search(r'<img[^>]*?data-src=[\'"]([^\'"]+)[\'"]', cell_val)
-    if img_url_match:
-        return img_url_match.group(1)
-    
-    img_url_match = re.search(r'<img[^>]*?data-a-hires=[\'"]([^\'"]+)[\'"]', cell_val)
-    if img_url_match:
-        return img_url_match.group(1)
-    
-    # Last resort, try to match any src-like attribute
-    img_url_match = re.search(r'<img[^>]*?(?:src|data-[^=]+)=[\'"]([^\'"]+)[\'"]', cell_val)
-    if img_url_match:
-        return img_url_match.group(1)
-    
-    return None
-
-def resolve_relative_url(base_url, img_url):
-    """Resolve a relative URL to absolute URL."""
-    if not img_url:
-        return None
-    
-    # Check if URL is already absolute
-    if img_url.startswith(('http://', 'https://', 'data:')):
-        return img_url
-    
-    # Handle data URIs
-    if img_url.startswith('data:'):
-        return img_url
-    
-    # Parse base URL
-    try:
-        parsed_base = urlparse(base_url)
-        base_url = f"{parsed_base.scheme}://{parsed_base.netloc}"
-        
-        # Handle different types of relative URLs
-        if img_url.startswith('//'):
-            # Protocol-relative URL
-            return f"{parsed_base.scheme}:{img_url}"
-        elif img_url.startswith('/'):
-            # Root-relative URL
-            return f"{base_url}{img_url}"
-        else:
-            # Path-relative URL (more complex, use urljoin)
-            return urljoin(base_url, img_url)
-    except Exception as e:
-        print(f"Error resolving URL {img_url} with base {base_url}: {e}")
-        return img_url  # Return original as fallback
-
-def download_image(img_url, img_filename, timeout=15, max_retries=3):
-    """Download image with retry logic and better error handling."""
-    for attempt in range(max_retries):
-        try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
-                'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Referer': urlparse(img_url).scheme + '://' + urlparse(img_url).netloc,
-            }
-            
-            # Handle data URIs
-            if img_url.startswith('data:image/'):
-                try:
-                    # Extract base64 data from data URI
-                    data_uri_parts = img_url.split(',', 1)
-                    if len(data_uri_parts) > 1 and ';base64,' in data_uri_parts[0]:
-                        img_data = base64.b64decode(data_uri_parts[1])
-                        with open(img_filename, 'wb') as img_file:
-                            img_file.write(img_data)
+def accept_cookies(driver, max_attempts=3):
+    """
+    Detect and accept common cookie consent banners and overlays
+    Args:
+        driver: Selenium WebDriver instance
+        max_attempts: Maximum number of attempts to find and click consent buttons
+    """
+    print("Checking for cookie consent banners...")
+    # Common terms found in cookie acceptance buttons and their containing elements
+    consent_button_patterns = [
+        # Button text patterns (case insensitive)
+        "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'accept')]",
+        "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'agree')]",
+        "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'consent')]",
+        "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'got it')]",
+        "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'i agree')]",
+        "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'ok')]",
+        "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'allow')]",
+        "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'continue')]",
+        # Links or anchor tags
+        "//a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'accept')]",
+        "//a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'agree')]",
+        "//a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'consent')]",
+        # Input buttons
+        "//input[@type='button' and contains(translate(@value, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'accept')]",
+        "//input[@type='button' and contains(translate(@value, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'agree')]",
+        # Div and span elements acting as buttons
+        "//div[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'accept') and (@role='button' or contains(@class, 'btn') or contains(@class, 'button'))]",
+        "//div[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'agree') and (@role='button' or contains(@class, 'btn') or contains(@class, 'button'))]",
+        "//span[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'accept') and (@role='button' or contains(@class, 'btn') or contains(@class, 'button'))]",
+        # IDs and classes
+        "//*[contains(@id, 'cookie-accept') or contains(@id, 'accept-cookie') or contains(@id, 'cookieAccept')]",
+        "//*[contains(@class, 'cookie-accept') or contains(@class, 'accept-cookie') or contains(@class, 'cookieAccept')]",
+        "//*[contains(@id, 'cookie-agree') or contains(@id, 'agree-cookie') or contains(@id, 'cookieAgree')]",
+        "//*[contains(@id, 'cookie-consent') or contains(@id, 'consent-cookie') or contains(@id, 'cookieConsent')]"
+    ]
+    # Try each attempt
+    for attempt in range(max_attempts):
+        for xpath in consent_button_patterns:
+            try:
+                # Short wait to find the element
+                buttons = driver.find_elements(By.XPATH, xpath)
+                for button in buttons:
+                    # Check if element is visible
+                    if button.is_displayed():
+                        print(f"Found consent button: {button.text or button.get_attribute('value') or button.get_attribute('id') or 'unnamed button'}")
+                        button.click()
+                        print("Clicked consent button")
+                        time.sleep(1)  # Wait for overlay to disappear
                         return True
-                except Exception as data_uri_err:
-                    print(f"Error processing data URI: {data_uri_err}")
-                    return False
-            
-            # Regular URL download
-            response = requests.get(img_url, headers=headers, stream=True, timeout=timeout)
-            response.raise_for_status()
-            
-            # Get content type to determine file extension
-            content_type = response.headers.get('Content-Type', '')
-            
-            # Check if we got an image
-            if 'image' not in content_type and attempt < max_retries - 1:
-                print(f"Warning: URL {img_url} did not return an image (got {content_type}). Retrying...")
-                time.sleep(1)
-                continue
-            
-            # Ensure directory exists
-            os.makedirs(os.path.dirname(img_filename), exist_ok=True)
-            
-            # Save the image
-            with open(img_filename, 'wb') as img_file:
-                for chunk in response.iter_content(chunk_size=8192):
-                    img_file.write(chunk)
-            
-            # Verify file was created and has content
-            if os.path.exists(img_filename) and os.path.getsize(img_filename) > 0:
-                return True
-            else:
-                if attempt < max_retries - 1:
-                    print(f"Empty image file downloaded for {img_url}. Retrying...")
-                    time.sleep(1)
-                    continue
-                return False
-                
-        except Exception as e:
-            if attempt < max_retries - 1:
-                print(f"Error downloading image {img_url} (attempt {attempt+1}/{max_retries}): {e}")
-                time.sleep(1)
-            else:
-                print(f"Failed to download image after {max_retries} attempts: {img_url}, Error: {e}")
-                return False
+            except Exception as e:
+                # Just continue to the next pattern
+                pass
+        # If no button found on this attempt, wait a bit and try again
+        if attempt < max_attempts - 1:
+            time.sleep(1)
     
+    # Special cases for iframes (some consent banners are in iframes)
+    try:
+        frames = driver.find_elements(By.TAG_NAME, "iframe")
+        for frame in frames:
+            try:
+                # Check if the frame might be a cookie consent frame
+                frame_id = frame.get_attribute("id") or ""
+                frame_name = frame.get_attribute("name") or ""
+                if ("cookie" in frame_id.lower() or
+                    "consent" in frame_id.lower() or
+                    "cookie" in frame_name.lower() or
+                    "consent" in frame_name.lower()):
+                    # Switch to this frame
+                    driver.switch_to.frame(frame)
+                    print(f"Switched to frame: {frame_id or frame_name}")
+                    # Try all our patterns in this frame
+                    for xpath in consent_button_patterns:
+                        try:
+                            buttons = driver.find_elements(By.XPATH, xpath)
+                            for button in buttons:
+                                if button.is_displayed():
+                                    button.click()
+                                    print(f"Clicked consent button in iframe: {button.text or 'unnamed button'}")
+                                    time.sleep(1)
+                                    driver.switch_to.default_content()
+                                    return True
+                        except:
+                            pass
+                    # Switch back to main content
+                    driver.switch_to.default_content()
+            except:
+                driver.switch_to.default_content()
+                continue
+    except Exception as e:
+        print(f"Error checking frames: {e}")
+    
+    print("No cookie consent buttons found or unable to interact with them")
     return False
 
-def process_table_images(table_data, base_url, image_dir="extracted_images"):
-    """Process all images in a table, downloading them and updating the DataFrame."""
+def extract_table_data(table_element, driver):
+    """
+    Extract data from a table element into a pandas DataFrame
+    Args:
+        table_element: Selenium WebElement representing a table
+        driver: Selenium WebDriver instance
+    Returns:
+        dict: A dictionary containing the DataFrame, HTML, and other table info
+    """
+    try:
+        # Get table HTML
+        table_html = table_element.get_attribute('outerHTML')
+        
+        # Get table caption or title
+        table_title = ""
+        try:
+            # Try to find caption within the table
+            caption = table_element.find_element(By.TAG_NAME, "caption")
+            if caption:
+                table_title = caption.text.strip()
+        except NoSuchElementException:
+            # Try to find a nearby heading
+            try:
+                # Look for headings that could be associated with this table
+                script = """
+                function findTableHeading(table) {
+                    // Check previous siblings for headings
+                    let el = table;
+                    while (el = el.previousElementSibling) {
+                        if (el.tagName.match(/^H[1-6]$/)) {
+                            return el.textContent.trim();
+                        }
+                    }
+                    
+                    // Check parent for heading
+                    let parent = table.parentElement;
+                    if (parent) {
+                        // Check for heading within the parent before the table
+                        let found = false;
+                        for (let i = 0; i < parent.children.length; i++) {
+                            let child = parent.children[i];
+                            if (child === table) {
+                                found = true;
+                                break;
+                            }
+                            if (child.tagName.match(/^H[1-6]$/)) {
+                                return child.textContent.trim();
+                            }
+                        }
+                    }
+                    
+                    // Check parent's parent for section title
+                    let grandparent = parent ? parent.parentElement : null;
+                    if (grandparent) {
+                        let headings = grandparent.querySelectorAll('h1, h2, h3, h4, h5, h6');
+                        if (headings.length > 0) {
+                            return headings[headings.length - 1].textContent.trim();
+                        }
+                    }
+                    
+                    return "";
+                }
+                return findTableHeading(arguments[0]);
+                """
+                table_title = driver.execute_script(script, table_element)
+            except Exception as title_err:
+                print(f"Error finding table title: {title_err}")
+                
+        # If no title found, use generic name
+        if not table_title:
+            # Try to infer from table classes or ID
+            table_id = table_element.get_attribute('id') or ""
+            table_class = table_element.get_attribute('class') or ""
+            
+            if table_id:
+                table_title = f"Table: {table_id}"
+            elif table_class:
+                table_title = f"Table: {table_class.split()[0]}"
+            else:
+                table_title = "Untitled Table"
+        
+        # Use BeautifulSoup to parse the HTML table
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(table_html, 'html.parser')
+        
+        # Extract headers (prioritize thead > tr > th)
+        headers = []
+        thead = soup.find('thead')
+        if thead:
+            header_row = thead.find('tr')
+            if header_row:
+                headers = [th.get_text(strip=True) for th in header_row.find_all(['th', 'td'])]
+        
+        # If no headers in thead, try first row
+        if not headers:
+            first_row = soup.find('tr')
+            if first_row:
+                for cell in first_row.find_all(['th', 'td']):
+                    # Check if it looks like a header (e.g., has bold text or is a th)
+                    if cell.name == 'th' or cell.find('strong') or cell.find('b'):
+                        headers.append(cell.get_text(strip=True))
+                    else:
+                        headers.append(cell.get_text(strip=True))
+        
+        # If still no headers, create generic column names
+        if not headers and soup.find_all('tr'):
+            first_row = soup.find('tr')
+            num_cols = len(first_row.find_all(['th', 'td']))
+            headers = [f"Column {i+1}" for i in range(num_cols)]
+        
+        # Extract rows
+        rows = []
+        for tr in soup.find_all('tr'):
+            # Skip header row if we already processed it
+            if tr.parent and tr.parent.name == 'thead' and headers:
+                continue
+            
+            # Skip if it's the first row and we used it for headers
+            if not rows and tr == soup.find('tr') and len(headers) > 0:
+                # Check if this is likely a header row
+                cells = tr.find_all(['th', 'td'])
+                header_like = any(cell.name == 'th' for cell in cells)
+                if header_like:
+                    continue
+            
+            row = []
+            for cell in tr.find_all(['td', 'th']):
+                # Check for images and preserve them
+                img = cell.find('img')
+                if img:
+                    img_src = img.get('src', '')
+                    if img_src:
+                        # Create HTML image tag to preserve in the data
+                        row.append(f'<img src="{img_src}" style="max-width:50px; max-height:50px;">')
+                    else:
+                        row.append(cell.get_text(strip=True))
+                else:
+                    row.append(cell.get_text(strip=True))
+            
+            # Only add non-empty rows
+            if any(cell.strip() for cell in row if isinstance(cell, str)):
+                rows.append(row)
+        
+        # Create DataFrame
+        df = None
+        if rows and headers and len(rows[0]) == len(headers):
+            df = pd.DataFrame(rows, columns=headers)
+        elif rows:
+            # If header count doesn't match row cell count, create generic headers
+            max_cols = max(len(row) for row in rows)
+            generic_headers = [f"Column {i+1}" for i in range(max_cols)]
+            # Pad rows with empty strings if needed
+            padded_rows = [row + [''] * (max_cols - len(row)) for row in rows]
+            df = pd.DataFrame(padded_rows, columns=generic_headers)
+        
+        # If we have a dataframe, return it along with other info
+        if df is not None and not df.empty:
+            return {
+                'title': table_title,
+                'dataframe': df,
+                'html': table_html
+            }
+        else:
+            return None
+    
+    except Exception as e:
+        print(f"Error extracting table data: {e}")
+        return None
+
+def get_div_table_data(div_element, driver):
+    """
+    Extract data from a div that looks like a table
+    Args:
+        div_element: Selenium WebElement representing a div-based table
+        driver: Selenium WebDriver instance
+    Returns:
+        dict: A dictionary containing the DataFrame, HTML, and other table info
+    """
+    try:
+        # Get div HTML
+        div_html = div_element.get_attribute('outerHTML')
+        
+        # Try to determine if this is a table-like structure
+        class_name = div_element.get_attribute('class') or ''
+        table_like_classes = ['table', 'grid', 'data-table', 'datatable', 'standings']
+        
+        is_table_like = any(cls in class_name.lower() for cls in table_like_classes)
+        
+        if not is_table_like:
+            # Check for regular structure indicating a table
+            row_elements = div_element.find_elements(By.XPATH, './div[contains(@class, "row") or contains(@class, "tr")]')
+            if len(row_elements) < 2:  # Need at least a header row and one data row
+                row_elements = div_element.find_elements(By.XPATH, './ul | ./ol')
+                
+            if len(row_elements) < 2:
+                # Not enough row structure to be a table
+                return None
+        
+        # Get table title
+        table_title = ""
+        try:
+            # Look for headings near this div
+            script = """
+            function findDivTableHeading(div) {
+                // Check for a heading just before this div
+                let el = div;
+                while (el = el.previousElementSibling) {
+                    if (el.tagName.match(/^H[1-6]$/)) {
+                        return el.textContent.trim();
+                    }
+                }
+                
+                // Check parent's children before this div
+                let parent = div.parentElement;
+                if (parent) {
+                    let found = false;
+                    for (let i = 0; i < parent.children.length; i++) {
+                        let child = parent.children[i];
+                        if (child === div) {
+                            found = true;
+                            break;
+                        }
+                        if (child.tagName.match(/^H[1-6]$/)) {
+                            return child.textContent.trim();
+                        }
+                    }
+                }
+                
+                // Look for a title/caption div within the table-like div
+                let titleElements = div.querySelectorAll('.title, .caption, .header, .heading');
+                if (titleElements.length > 0) {
+                    return titleElements[0].textContent.trim();
+                }
+                
+                return "";
+            }
+            return findDivTableHeading(arguments[0]);
+            """
+            table_title = driver.execute_script(script, div_element)
+        except Exception as title_err:
+            print(f"Error finding div table title: {title_err}")
+        
+        # If no title found, use generic name
+        if not table_title:
+            div_id = div_element.get_attribute('id') or ""
+            if div_id:
+                table_title = f"Table: {div_id}"
+            else:
+                table_title = f"Table: {class_name}" if class_name else "Untitled Table"
+        
+        # Use BeautifulSoup to parse the div structure
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(div_html, 'html.parser')
+        
+        # Try different strategies to extract header and rows
+        
+        # Strategy 1: Look for explicit row/column classes
+        headers = []
+        rows = []
+        
+        # Look for header elements
+        header_elements = soup.select('.header, .heading, .headers, th, [role="columnheader"]')
+        if header_elements:
+            headers = [h.get_text(strip=True) for h in header_elements]
+        
+        # Look for row elements
+        row_elements = soup.select('.row, .data-row, tr, li, [role="row"]')
+        for row_el in row_elements:
+            # Skip if this looks like a header row and we already have headers
+            if (row_el.select_one('.header, .heading, th') or 'header' in row_el.get('class', [])) and headers:
+                continue
+                
+            # Get cells
+            cell_elements = row_el.select('.cell, .column, td, span')
+            if not cell_elements:
+                # Try direct children if no specific cell classes
+                cell_elements = [child for child in row_el.children if child.name]
+                
+            row = []
+            for cell in cell_elements:
+                # Check for images
+                img = cell.find('img')
+                if img:
+                    img_src = img.get('src', '')
+                    if img_src:
+                        row.append(f'<img src="{img_src}" style="max-width:50px; max-height:50px;">')
+                    else:
+                        row.append(cell.get_text(strip=True))
+                else:
+                    row.append(cell.get_text(strip=True))
+                    
+            # Only add non-empty rows
+            if row and any(str(cell).strip() for cell in row):
+                rows.append(row)
+        
+        # If that didn't work, try a simpler approach looking for regular structure
+        if not rows:
+            # Assume first row might be header
+            first_row = soup.find(class_=lambda c: c and ('row' in c or 'header' in c))
+            
+            # If no classes help, look for consistent structure
+            if not first_row:
+                # Look for sets of similar elements that might be rows
+                direct_children = [c for c in soup.find('div').children if c.name]
+                
+                # Group by tag name to find the most common tag that could represent rows
+                from collections import Counter
+                tag_counts = Counter(child.name for child in direct_children if child.name)
+                
+                if tag_counts:
+                    most_common_tag = tag_counts.most_common(1)[0][0]
+                    potential_rows = soup.find_all(most_common_tag, recursive=False)
+                    
+                    if potential_rows:
+                        # First row might be header
+                        headers = []
+                        for cell in potential_rows[0].children:
+                            if cell.name:
+                                headers.append(cell.get_text(strip=True))
+                        
+                        # Process remaining rows
+                        for row_el in potential_rows[1:]:
+                            row = []
+                            for cell in row_el.children:
+                                if cell.name:
+                                    # Check for images
+                                    img = cell.find('img')
+                                    if img:
+                                        img_src = img.get('src', '')
+                                        if img_src:
+                                            row.append(f'<img src="{img_src}" style="max-width:50px; max-height:50px;">')
+                                        else:
+                                            row.append(cell.get_text(strip=True))
+                                    else:
+                                        row.append(cell.get_text(strip=True))
+                            
+                            if row and any(str(cell).strip() for cell in row):
+                                rows.append(row)
+        
+        # Create DataFrame
+        df = None
+        if rows and headers and len(rows[0]) == len(headers):
+            df = pd.DataFrame(rows, columns=headers)
+        elif rows:
+            # If header count doesn't match row cell count or no headers, create generic headers
+            max_cols = max(len(row) for row in rows)
+            generic_headers = [f"Column {i+1}" for i in range(max_cols)]
+            # Pad rows with empty strings if needed
+            padded_rows = [row + [''] * (max_cols - len(row)) for row in rows]
+            df = pd.DataFrame(padded_rows, columns=generic_headers)
+        
+        # If we have a dataframe, return it along with other info
+        if df is not None and not df.empty:
+            return {
+                'title': table_title,
+                'dataframe': df,
+                'html': div_html
+            }
+        else:
+            return None
+    
+    except Exception as e:
+        print(f"Error extracting div table data: {e}")
+        return None
+
+def screenshot_table_element(driver, table_element, base_filename, idx=0):
+    """
+    Take a screenshot of a specific table element
+    Args:
+        driver: Selenium WebDriver instance
+        table_element: WebElement of the table to screenshot
+        base_filename: Base filename to use for the screenshot
+        idx: Index of the table (for multiple tables)
+    Returns:
+        str: Path to the screenshot file, or None if failed
+    """
+    try:
+        # Create screenshots directory if it doesn't exist
+        os.makedirs('screenshots', exist_ok=True)
+        
+        # Scroll to the table element to make sure it's visible
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center', behavior: 'instant'});", table_element)
+        time.sleep(0.5)
+        
+        # Try to ensure the whole table is visible
+        driver.execute_script("""
+            // Force table to be fully visible
+            arguments[0].style.overflow = 'visible';
+            
+            // If there are parent containers with overflow:hidden, fix them
+            let parent = arguments[0].parentElement;
+            for (let i = 0; i < 5 && parent; i++) {
+                if (window.getComputedStyle(parent).overflow === 'hidden' ||
+                    window.getComputedStyle(parent).overflowX === 'hidden') {
+                    parent.style.overflow = 'visible';
+                    parent.style.overflowX = 'visible';
+                }
+                parent = parent.parentElement;
+            }
+        """, table_element)
+        time.sleep(0.5)
+        
+        # Create screenshot filename
+        filename = f"screenshots/{base_filename}_table_{idx}.png"
+        
+        # Take the screenshot
+        table_element.screenshot(filename)
+        print(f"Table screenshot saved as {filename}")
+        return filename
+    
+    except Exception as e:
+        print(f"Error taking table screenshot: {e}")
+        return None
+
+def screenshot_tables(url):
+    """
+    Find and extract all tables from a webpage
+    Args:
+        url (str): The URL of the webpage
+    Returns:
+        list: List of dictionaries containing table data, each with:
+             - 'title': Table title/caption
+             - 'dataframe': pandas DataFrame of the table data
+             - 'html': HTML string of the table
+             - 'screenshot': Path to screenshot image (if successful)
+    """
+    # Set up Chrome options for headless environment
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1920,1080")
+    
+    # Initialize WebDriver
+    driver = webdriver.Chrome(options=chrome_options)
+    
+    tables_info = []
+    safe_domain = "webpage"
+    
+    try:
+        # Load the webpage
+        driver.get(url)
+        print(f"Loaded page: {url}")
+        
+        # Wait for the page to load
+        time.sleep(3)
+        
+        # Handle cookie consent overlays
+        accept_cookies(driver)
+        
+        # Create a safe base filename from the URL
+        domain_name = re.sub(r'^https?://(www\.)?', '', url).split('/')[0]
+        safe_domain = re.sub(r'[^\w\s-]', '', domain_name).strip().replace('.', '_')
+        
+        # Find all HTML tables
+        print("Looking for HTML tables...")
+        tables = driver.find_elements(By.TAG_NAME, "table")
+        print(f"Found {len(tables)} HTML tables")
+        
+        # Process each HTML table
+        for idx, table in enumerate(tables):
+            try:
+                # Check if table is visible and has content
+                if not table.is_displayed():
+                    print(f"Table {idx+1} is not displayed, skipping")
+                    continue
+                
+                # Extract table data
+                table_data = extract_table_data(table, driver)
+                
+                if table_data:
+                    # Take screenshot of the table
+                    screenshot = screenshot_table_element(driver, table, safe_domain, idx)
+                    if screenshot:
+                        table_data['screenshot'] = screenshot
+                    
+                    tables_info.append(table_data)
+                    print(f"Successfully extracted table {idx+1}: {table_data['title']}")
+            except Exception as table_err:
+                print(f"Error processing table {idx+1}: {table_err}")
+        
+        # Now look for div-based tables
+        print("Looking for div-based tables...")
+        div_table_selectors = [
+            "div.table", "div.datatable", "div.grid", "div.data-table",
+            "div.standings", "div[role='table']", "div.table-responsive",
+            "div[class*='table']", "div[class*='grid']"
+        ]
+        
+        for selector in div_table_selectors:
+            try:
+                div_tables = driver.find_elements(By.CSS_SELECTOR, selector)
+                print(f"Found {len(div_tables)} potential div-based tables with selector: {selector}")
+                
+                for idx, div_table in enumerate(div_tables):
+                    try:
+                        # Check if this div is visible and likely a table
+                        if not div_table.is_displayed():
+                            continue
+                        
+                        # Extract data from div-based table
+                        div_table_data = get_div_table_data(div_table, driver)
+                        
+                        if div_table_data:
+                            # Take screenshot
+                            screenshot = screenshot_table_element(driver, div_table, f"{safe_domain}_div", len(tables_info))
+                            if screenshot:
+                                div_table_data['screenshot'] = screenshot
+                            
+                            tables_info.append(div_table_data)
+                            print(f"Successfully extracted div-based table: {div_table_data['title']}")
+                    except Exception as div_err:
+                        print(f"Error processing div-based table: {div_err}")
+            except Exception as selector_err:
+                print(f"Error with selector {selector}: {selector_err}")
+        
+        # If no tables found, try to use AI to extract from the entire page
+        if not tables_info:
+            print("No standard tables found. Taking a screenshot of the full page.")
+            os.makedirs('screenshots', exist_ok=True)
+            full_page_file = f"screenshots/{safe_domain}_full_page.png"
+            driver.save_screenshot(full_page_file)
+            print(f"Full page screenshot saved as {full_page_file}")
+            
+            # You might want to add AI-based extraction here in the future
+        
+        # Process table data to handle image URLs
+        for table_data in tables_info:
+            if 'dataframe' in table_data:
+                df = table_data['dataframe']
+                # Check if this table has images
+                has_images = False
+                
+                # Process each cell to find image tags
+                for i, row in df.iterrows():
+                    for col in df.columns:
+                        cell_val = str(row[col])
+                        if '<img src=' in cell_val:
+                            has_images = True
+                            break
+                    if has_images:
+                        break
+                
+                table_data['has_images'] = has_images
+        
+        print(f"Total tables extracted: {len(tables_info)}")
+        return tables_info
+    
+    except Exception as e:
+        print(f"An error occurred while extracting tables: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        # Take screenshot of the entire page as a fallback
+        try:
+            os.makedirs('screenshots', exist_ok=True)
+            driver.save_screenshot(f"screenshots/error_{safe_domain}.png")
+            print(f"Error occurred, full page screenshot saved")
+        except:
+            pass
+            
+        return []
+    
+    finally:
+        driver.quit()
+
+def download_table_images(table_data, base_dir="extracted_images"):
+    """
+    Download images found in table data and update DataFrame with local paths
+    Args:
+        table_data: Dictionary containing table information including DataFrame
+        base_dir: Directory to save downloaded images
+    Returns:
+        Updated table_data with local image paths
+    """
     if not table_data.get('has_images', False) or 'dataframe' not in table_data:
         return table_data
     
     # Create image directory if it doesn't exist
-    os.makedirs(image_dir, exist_ok=True)
+    os.makedirs(base_dir, exist_ok=True)
     
-    # Get a clean filename base
-    url_domain = urlparse(base_url).netloc.replace("www.", "")
-    safe_domain = re.sub(r'[^\w\s-]', '', url_domain).strip().replace('.', '_')
+    # Get safe title for filename
     safe_title = re.sub(r'[^\w\s-]', '', table_data['title']).strip().replace(' ', '_')
     safe_title = re.sub(r'[-_]+', '_', safe_title)
     
     # Clone the DataFrame
     df = table_data['dataframe'].copy()
     processed = False
-    downloaded_images = []
     
     # Process each cell to find and download images
     for i, row in df.iterrows():
         for col in df.columns:
             cell_val = str(row[col])
-            if "<img" in cell_val:
+            if '<img src=' in cell_val:
                 # Extract image URL
-                img_url = extract_image_url(cell_val)
-                if img_url:
-                    # Resolve relative URLs
-                    img_url = resolve_relative_url(base_url, img_url)
+                img_url_match = re.search(r'src="([^"]+)"', cell_val)
+                if img_url_match:
+                    img_url = img_url_match.group(1)
+                    
+                    # Handle relative URLs
+                    if img_url.startswith('/'):
+                        # Try to determine the base URL
+                        if 'source_url' in table_data:
+                            from urllib.parse import urlparse
+                            parsed_url = urlparse(table_data['source_url'])
+                            base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+                            img_url = base_url + img_url
+                        else:
+                            # Can't resolve relative URL without base
+                            df.at[i, col] = f"Image URL: {img_url} (relative URL, could not resolve)"
+                            processed = True
+                            continue
                     
                     # Generate a unique filename for the image
-                    file_ext = os.path.splitext(urlparse(img_url).path)[-1].lower()
-                    if not file_ext or file_ext not in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg']:
-                        file_ext = '.jpg'  # Default extension
+                    img_extension = os.path.splitext(img_url.split('?')[0])[1] or '.jpg'
+                    if img_extension.lower() not in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg']:
+                        img_extension = '.jpg'  # Default extension
                     
-                    img_filename = f"{image_dir}/{safe_domain}_{safe_title}_{uuid.uuid4().hex[:8]}{file_ext}"
+                    img_filename = f"{base_dir}/{safe_title}_{uuid.uuid4().hex[:8]}{img_extension}"
                     
-                    # Download the image
-                    if download_image(img_url, img_filename):
-                        # Update cell with local image path
-                        df.at[i, col] = f"Image: {img_filename}"
-                        downloaded_images.append(img_filename)
+                    try:
+                        # Download the image
+                        response = requests.get(img_url, stream=True, timeout=10)
+                        if response.status_code == 200:
+                            with open(img_filename, 'wb') as img_file:
+                                img_file.write(response.content)
+                            
+                            # Update cell with local image path
+                            df.at[i, col] = f"Image: {img_filename}"
+                            processed = True
+                        else:
+                            df.at[i, col] = f"Image URL: {img_url} (download failed, status: {response.status_code})"
+                            processed = True
+                    except Exception as img_err:
+                        print(f"Error downloading image {img_url}: {img_err}")
+                        df.at[i, col] = f"Image URL: {img_url} (download failed: {str(img_err)[:100]})"
                         processed = True
-                    else:
-                        df.at[i, col] = f"Image URL: {img_url} (download failed)"
-                        processed = True
-                else:
-                    df.at[i, col] = f"Image tag found but URL could not be extracted"
-                    processed = True
     
     # Update table data with processed DataFrame if changes were made
     if processed:
         table_data['dataframe_with_local_images'] = df
-        table_data['downloaded_images'] = downloaded_images
     
     return table_data
 
-# --- Input Section ---
-url = st.text_input("Enter the URL of the webpage:", key="url_input")
-is_amazon_product_page = bool(url and ("amazon.com" in url or "amzn." in url or "amzn.to" in url) and ("/dp/" in url or "/gp/product/" in url))
-
-if is_amazon_product_page:
-    st.info("Amazon product page detected. Direct extraction will be attempted.", icon="🛒")
-    button_text = "Extract Amazon Tables"
-else:
-    st.info("General webpage detected. Extracting all tables from the page.", icon="📄")
-    button_text = "Extract All Tables"
-
-format_type = st.selectbox(
-    "Select desired output format:",
-    options=["CSV", "JSON", "HTML"],
-    index=0 # Default to CSV
-)
-
-# --- Action Button ---
-if st.button(button_text, key="main_action_button", disabled=not url):
-    # Reset state before action
-    st.session_state.update({
-        'data_extracted': False, 
-        'extracted_tables': [], 
-        'extracted_formats': [],
-        'extracted_filenames': [], 
-        'screenshot_captured': False,
-        'screenshot_filenames': [], 
-        'extraction_method': None,
-        'selected_table_index': 0,
-        'downloaded_images': []
-    })
+def screenshot_table(url, table_title):
+    """
+    Legacy function for backwards compatibility - captures a screenshot of a specific table
+    Args:
+        url (str): The URL of the webpage containing the table
+        table_title (str): The title or caption of the table to screenshot
+    """
+    # Set up Chrome options for Colab environment
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1920,1080")
     
-    progress = st.progress(0)
-    status = st.empty()
+    # Initialize WebDriver with specific Colab settings
+    driver = webdriver.Chrome(options=chrome_options)
     
-    if is_amazon_product_page:
-        # --- Amazon Direct Extraction Workflow ---
-        st.session_state.extraction_method = 'amazon'
-        status.text("Attempting direct extraction from Amazon...")
-        progress.progress(25)
+    try:
+        # Load the webpage
+        driver.get(url)
+        print(f"Loaded page: {url}")
         
-        # Call the imported function
-        extracted_result = amazon_tables(url)
-        progress.progress(75)
+        # Wait for the page to load
+        time.sleep(3)
         
-        # Check the status returned by the function
-        if extracted_result['status'] == 'success':
-            status.text("Amazon table extracted successfully!")
-            df = extracted_result["dataframe"]
-            html_content = extracted_result["html"]
-            
-            # Save as a table entry
-            table_data = {
-                "title": "Amazon Product Comparison",
-                "dataframe": df,
-                "html": html_content,
-                "source_url": url,
-                "has_images": any("<img" in str(cell) for row in df.values for cell in row)
-            }
-            
-            # Format table data
-            if format_type == "CSV":
-                table_data["content"] = df.to_csv(index=False)
-                table_data["format"] = "CSV"
-                table_data["filename"] = f"amazon_comparison.csv"
-            elif format_type == "JSON":
-                table_data["content"] = df.to_json(orient="records", indent=2)
-                table_data["format"] = "JSON"
-                table_data["filename"] = f"amazon_comparison.json"
-            else:  # HTML
-                table_data["content"] = f"<html><head><meta charset='UTF-8'><title>Amazon Comparison</title></head><body>\n{html_content}\n</body></html>"
-                table_data["format"] = "HTML"
-                table_data["filename"] = f"amazon_comparison.html"
-            
-            # Handle any images in the table
-            if table_data["has_images"]:
-                status.text("Processing images in the Amazon table...")
-                # Process images with improved image handling
-                processed_table = process_table_images(table_data, url)
-                
-                # If processing added the dataframe with local images, update content accordingly
-                if "dataframe_with_local_images" in processed_table:
-                    processed_df = processed_table["dataframe_with_local_images"]
-                    
-                    # Update content based on format with local image paths
-                    if format_type == "CSV":
-                        processed_table["content_with_local_images"] = processed_df.to_csv(index=False)
-                    elif format_type == "JSON":
-                        processed_table["content_with_local_images"] = processed_df.to_json(orient="records", indent=2)
-                    else:  # HTML
-                        # Create HTML with local image paths
-                        local_html = processed_df.to_html(escape=False, index=False)
-                        processed_table["content_with_local_images"] = f"<html><head><meta charset='UTF-8'><title>Amazon Comparison</title></head><body>\n{local_html}\n</body></html>"
-                
-                # Add downloaded images to session state
-                if "downloaded_images" in processed_table:
-                    st.session_state.downloaded_images.extend(processed_table["downloaded_images"])
-                
-                # Update the table in session state
-                table_data = processed_table
-            
-            # Add to session state
-            st.session_state.extracted_tables.append(table_data)
-            st.session_state.extracted_formats.append(format_type)
-            st.session_state.extracted_filenames.append(table_data["filename"])
-            st.session_state.data_extracted = True
-            
-            progress.progress(100)
-            st.rerun()  # Rerun to show results
-        else:
-            # Handle different failure statuses from amazon_tables
-            status.error(f"Amazon Extraction Failed: {extracted_result.get('message', 'Unknown error')}")
-            st.error(f"Details: {extracted_result.get('message', 'No further details.')}")
-            progress.progress(100)
-            st.session_state.data_extracted = False
-    
-    else:
-        # --- General Webpage Table Extraction Workflow ---
-        st.session_state.extraction_method = 'general'
-        status.text("Extracting all tables from the webpage...")
-        progress.progress(10)
+        # Handle cookie consent overlays
+        accept_cookies(driver)
         
+        # Find the table element
+        table_element = None
+        
+        # Strategy 1: Find by title in standard table elements
         try:
-            # Create a unique identifier for this extraction
-            extraction_id = uuid.uuid4().hex[:8]
-            domain_name = re.sub(r'^https?://(www\.)?', '', url).split('/')[0]
-            safe_domain = re.sub(r'[^\w\s-]', '', domain_name).strip().replace('.', '_')
-            
-            # Get all tables from the page
-            tables_info = screenshot_tables(url)
-            
-            if not tables_info or len(tables_info) == 0:
-                status.warning("No tables found on the webpage.")
-                progress.progress(100)
-                st.warning("No tables were detected on the provided webpage. Try a different URL.")
-                st.stop()
-            
-            status.text(f"Found {len(tables_info)} tables on the webpage. Processing...")
-            progress.progress(30)
-            
-            # Process each table
-            for idx, table_info in enumerate(tables_info):
-                progress_value = 30 + int(60 * (idx + 1) / len(tables_info))
-                progress.progress(progress_value)
-                status.text(f"Processing table {idx+1} of {len(tables_info)}...")
-                
-                table_title = table_info.get("title", f"Table {idx+1}")
-                safe_title = re.sub(r'[^\w\s-]', '', table_title).strip().replace(' ', '_')
-                
-                if not safe_title:
-                    safe_title = f"table_{idx+1}"
-                
-                # For each table, store screenshot if available
-                screenshot_path = table_info.get("screenshot", "")
-                if screenshot_path and os.path.exists(screenshot_path):
-                    st.session_state.screenshot_filenames.append(screenshot_path)
-                
-                # Process the table data
-                df = table_info.get("dataframe")
-                if df is not None:
-                    # Check for images in the dataframe
-                    has_images = any("<img" in str(cell) for row in df.values for cell in row)
-                    
-                    # Prepare table data
-                    table_data = {
-                        "title": table_title,
-                        "dataframe": df,
-                        "html": table_info.get("html", ""),
-                        "source_url": url,
-                        "has_images": has_images,
-                        "screenshot": screenshot_path
-                    }
-                    
-                    # Handle any images in the table with improved image handling
-                    if has_images:
-                        status.text(f"Processing images in table {idx+1}...")
-                        processed_table = process_table_images(table_data, url)
-                        
-                        # If processing added the dataframe with local images, update table_data
-                        if "dataframe_with_local_images" in processed_table:
-                            table_data = processed_table
-                            
-                            # Add downloaded images to session state
-                            if "downloaded_images" in processed_table:
-                                st.session_state.downloaded_images.extend(processed_table["downloaded_images"])
-                    
-                    # Format table data
-                    filename_base = f"{safe_domain}_{safe_title}_{extraction_id}"
-                    if format_type == "CSV":
-                        table_data["content"] = df.to_csv(index=False)
-                        table_data["format"] = "CSV"
-                        table_data["filename"] = f"{filename_base}.csv"
-                        
-                        if has_images and "dataframe_with_local_images" in table_data:
-                            processed_df = table_data["dataframe_with_local_images"]
-                            table_data["content_with_local_images"] = processed_df.to_csv(index=False)
-                    
-                    elif format_type == "JSON":
-                        table_data["content"] = df.to_json(orient="records", indent=2)
-                        table_data["format"] = "JSON"
-                        table_data["filename"] = f"{filename_base}.json"
-                        
-                        if has_images and "dataframe_with_local_images" in table_data:
-                            processed_df = table_data["dataframe_with_local_images"]
-                            table_data["content_with_local_images"] = processed_df.to_json(orient="records", indent=2)
-                    
-                    else:  # HTML
-                        table_html = table_info.get("html", df.to_html(escape=False, index=False))
-                        table_data["content"] = f"<html><head><meta charset='UTF-8'><title>{table_title}</title></head><body>\n{table_html}\n</body></html>"
-                        table_data["format"] = "HTML"
-                        table_data["filename"] = f"{filename_base}.html"
-                        
-                        if has_images and "dataframe_with_local_images" in table_data:
-                            processed_df = table_data["dataframe_with_local_images"]
-                            local_html = processed_df.to_html(escape=False, index=False)
-                            table_data["content_with_local_images"] = f"<html><head><meta charset='UTF-8'><title>{table_title}</title></head><body>\n{local_html}\n</body></html>"
-                    
-                    # Add to session state
-                    st.session_state.extracted_tables.append(table_data)
-                    st.session_state.extracted_formats.append(format_type)
-                    st.session_state.extracted_filenames.append(table_data["filename"])
-            
-            # Set flag that data was extracted successfully
-            if st.session_state.extracted_tables:
-                st.session_state.data_extracted = True
-                st.session_state.screenshot_captured = bool(st.session_state.screenshot_filenames)
-                status.text(f"Successfully extracted {len(st.session_state.extracted_tables)} tables!")
-            else:
-                status.warning("No tables could be extracted from the webpage.")
-            
-            progress.progress(100)
-            st.rerun()  # Show results
-            
+            # Look for tables with captions or titles
+            tables = driver.find_elements(By.XPATH,
+                f"//table[./caption[contains(text(), '{table_title}')] or @title[contains(., '{table_title}')]]")
+            if tables:
+                table_element = tables[0]
+                print(f"Found table with caption/title containing '{table_title}'")
         except Exception as e:
-            st.error(f"An error occurred during table extraction: {str(e)}")
-            import traceback
-            st.expander("Traceback").code(traceback.format_exc())
-            progress.progress(100)
-
-# --- Display Results and Download Links ---
-if st.session_state.data_extracted and st.session_state.extracted_tables:
-    st.markdown("---")
-    st.header(f"📊 Extracted Tables ({len(st.session_state.extracted_tables)})")
-    
-    # Table selection if multiple tables
-    if len(st.session_state.extracted_tables) > 1:
-        table_titles = [f"{idx+1}. {table['title']}" for idx, table in enumerate(st.session_state.extracted_tables)]
-        selected_table_index = st.selectbox(
-            "Select a table to view:",
-            options=range(len(table_titles)),
-            format_func=lambda x: table_titles[x],
-            index=st.session_state.selected_table_index
-        )
-        st.session_state.selected_table_index = selected_table_index
-    else:
-        selected_table_index = 0
-    
-    # Get the selected table data
-    table_data = st.session_state.extracted_tables[selected_table_index]
-    
-    # Display table information
-    st.subheader(table_data["title"])
-    st.caption(f"Source URL: {table_data['source_url']}")
-    
-    # Display screenshot if available
-    if "screenshot" in table_data and table_data["screenshot"] and os.path.exists(table_data["screenshot"]):
-        with st.expander("View Table Screenshot", expanded=True):
-            try:
-                image = Image.open(table_data["screenshot"])
-                st.image(image, caption=f"Screenshot: {table_data['title']}", use_container_width=True)
-            except Exception as img_e:
-                st.error(f"Error loading screenshot image: {img_e}")
-    
-    # Display the dataframe
-    df = table_data["dataframe"]
-    if df is not None:
-        st.dataframe(df)
-        st.caption(f"Table Preview ({df.shape[0]} rows, {df.shape[1]} columns)")
+            print(f"Error in strategy 1: {e}")
         
-        # Display raw content
-        with st.expander(f"View Raw {table_data['format']} Output"):
-            display_format = 'json' if table_data['format'] == 'JSON' else table_data['format'].lower()
+        # Strategy 2: Find heading elements containing the title, then look for nearby tables
+        if not table_element:
             try:
-                if table_data['format'] == "HTML": 
-                    st.code(table_data['content'], language='html')
-                elif table_data['format'] == "JSON": 
-                    st.json(table_data['content'])
-                else: 
-                    st.text(table_data['content'])
-            except Exception as display_err:
-                st.text(f"Raw content:\n{table_data['content']}")
+                # Find elements containing the title text
+                title_xpath = f"//*[contains(text(), '{table_title}')]"
+                title_elements = driver.find_elements(By.XPATH, title_xpath)
+                
+                for title_el in title_elements:
+                    print(f"Examining title element: {title_el.tag_name} with text: {title_el.text[:50]}...")
+                    
+                    # Look for tables near this title element
+                    try:
+                        # Try following siblings first (most common pattern)
+                        following_tables = driver.find_elements(By.XPATH,
+                            f"//h1[contains(text(), '{table_title}')]/following::table[1] | " +
+                            f"//h2[contains(text(), '{table_title}')]/following::table[1] | " +
+                            f"//h3[contains(text(), '{table_title}')]/following::table[1] | " +
+                            f"//h4[contains(text(), '{table_title}')]/following::table[1] | " +
+                            f"//div[contains(text(), '{table_title}')]/following::table[1]")
+                        
+                        if following_tables:
+                            table_element = following_tables[0]
+                            print(f"Found table after title element")
+                            break
+                        
+                        # Try looking for div-based tables
+                        following_div_tables = driver.find_elements(By.XPATH,
+                            f"//h1[contains(text(), '{table_title}')]/following::div[contains(@class, 'table')][1] | " +
+                            f"//h2[contains(text(), '{table_title}')]/following::div[contains(@class, 'table')][1] | " +
+                            f"//h3[contains(text(), '{table_title}')]/following::div[contains(@class, 'table')][1] | " +
+                            f"//h4[contains(text(), '{table_title}')]/following::div[contains(@class, 'table')][1] | " +
+                            f"//div[contains(text(), '{table_title}')]/following::div[contains(@class, 'table')][1] | " +
+                            f"//h1[contains(text(), '{table_title}')]/following::div[contains(@class, 'standings')][1] | " +
+                            f"//h2[contains(text(), '{table_title}')]/following::div[contains(@class, 'standings')][1] | " +
+                            f"//h3[contains(text(), '{table_title}')]/following::div[contains(@class, 'standings')][1] | " +
+                            f"//h4[contains(text(), '{table_title}')]/following::div[contains(@class, 'standings')][1] | " +
+                            f"//div[contains(text(), '{table_title}')]/following::div[contains(@class, 'standings')][1]")
+                        
+                        if following_div_tables:
+                            table_element = following_div_tables[0]
+                            print(f"Found div-based table after title element")
+                            break
+                        
+                        # Try to find a table in the parent container
+                        parent = title_el.find_element(By.XPATH, "..")
+                        
+                        # First look for standard tables
+                        tables_in_parent = parent.find_elements(By.TAG_NAME, "table")
+                        if tables_in_parent:
+                            table_element = tables_in_parent[0]
+                            print(f"Found table within title element's parent")
+                            break
+                        
+                        # Then look for div-based tables
+                        div_tables_in_parent = parent.find_elements(By.XPATH,
+                            ".//div[contains(@class, 'table') or contains(@class, 'standings') or contains(@class, 'grid')]")
+                        if div_tables_in_parent:
+                            table_element = div_tables_in_parent[0]
+                            print(f"Found div-based table within title element's parent")
+                            break
+                    except NoSuchElementException:
+                        continue
+            except Exception as e:
+                print(f"Error in strategy 2: {e}")
         
-        # If table has images that were processed with local paths
-        if table_data.get("has_images") and "dataframe_with_local_images" in table_data:
-            with st.expander("View Table With Local Image Paths"):
-                st.dataframe(table_data["dataframe_with_local_images"])
-                st.caption("Table with local file paths to downloaded images")
-                
-                # Show downloaded images preview
-                if "downloaded_images" in table_data and table_data["downloaded_images"]:
-                    st.subheader("Downloaded Images")
-                    image_cols = st.columns(min(3, len(table_data["downloaded_images"])))
-                    for i, img_path in enumerate(table_data["downloaded_images"][:9]):  # Limit to 9 images for preview
-                        try:
-                            if os.path.exists(img_path):
-                                with image_cols[i % 3]:
-                                    img = Image.open(img_path)
-                                    st.image(img, caption=os.path.basename(img_path), width=150)
-                        except Exception as img_err:
-                            print(f"Error displaying image {img_path}: {img_err}")
-    
-    # Download links
-    st.markdown("---")
-    st.subheader("⬇️ Download Options")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        try:
-            download_link = get_download_link(
-                table_data['content'],
-                table_data['filename'],
-                f"Download as {table_data['format']} ({table_data['filename']})",
-                table_data['format']
-            )
-            st.markdown(download_link, unsafe_allow_html=True)
-        except Exception as dl_error:
-            st.error(f"Error generating download link: {dl_error}")
-    
-    # Option to download version with local image paths if available
-    if table_data.get("has_images") and "content_with_local_images" in table_data:
-        with col2:
+        # Strategy 3: Specific handling for ESPN and similar sports sites
+        if not table_element and ("espn.com" in url or "standings" in url.lower()):
             try:
-                local_img_filename = table_data['filename'].replace(".", "_local_images.")
-                download_link = get_download_link(
-                    table_data['content_with_local_images'],
-                    local_img_filename,
-                    f"Download with local image paths ({local_img_filename})",
-                    table_data['format']
-                )
-                st.markdown(download_link, unsafe_allow_html=True)
-            except Exception as dl_error:
-                st.error(f"Error generating local images download link: {dl_error}")
-    
-    # Option to download images for the current table
-    if table_data.get("has_images") and "downloaded_images" in table_data and table_data["downloaded_images"]:
-        st.markdown("---")
-        st.subheader("📸 Download Images")
+                print("Using sports website specific strategy")
+                # Look for tabs or filters that might match our title
+                filter_xpath = "//div[contains(@class, 'filters')]//div | " + \
+                              "//div[contains(@class, 'tablist')]//div | " + \
+                              "//div[contains(@class, 'tabs')]//div | " + \
+                              "//ul[contains(@class, 'tabs')]//li"
+                filters = driver.find_elements(By.XPATH, filter_xpath)
+                clicked = False
+                for filter_el in filters:
+                    try:
+                        filter_text = filter_el.text.strip().lower()
+                        if table_title.lower() in filter_text or filter_text in table_title.lower():
+                            # This filter seems to match our title, try clicking it
+                            filter_el.click()
+                            clicked = True
+                            print(f"Clicked filter/tab: {filter_text}")
+                            time.sleep(2)  # Wait for content to update
+                            break
+                    except:
+                        continue
+                # Now look for standings containers
+                standings_xpath = "//div[contains(@class, 'standings')] | " + \
+                                 "//div[contains(@class, 'StandingsTable')] | " + \
+                                 "//div[contains(@class, 'Table')] | " + \
+                                 "//section[contains(@class, 'standings')]"
+                standings_containers = driver.find_elements(By.XPATH, standings_xpath)
+                if standings_containers:
+                    # If we clicked a filter, take the first container (most likely to be relevant)
+                    if clicked:
+                        table_element = standings_containers[0]
+                        print("Found standings container after clicking filter")
+                    else:
+                        # Try to find a container that might match our title
+                        for container in standings_containers:
+                            container_text = container.text.lower()
+                            if table_title.lower() in container_text:
+                                table_element = container
+                                print("Found standings container matching title")
+                                break
+                        # If no specific match, take the first one
+                        if not table_element and standings_containers:
+                            table_element = standings_containers[0]
+                            print("Using first standings container")
+            except Exception as e:
+                print(f"Error in sports website strategy: {e}")
         
-        # Create a zip file with just the current table's images
-        if st.button("Prepare ZIP file with images", key="download_images_button"):
+        # Strategy 4: Fallback to any table-like element
+        if not table_element:
             try:
-                zip_buffer = io.BytesIO()
-                
-                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                    for img_path in table_data["downloaded_images"]:
-                        if os.path.exists(img_path):
-                            zipf.write(img_path, os.path.basename(img_path))
-                
-                zip_buffer.seek(0)
-                table_name = re.sub(r'[^\w\s-]', '', table_data['title']).strip().replace(' ', '_')
-                zip_filename = f"{table_name}_images.zip"
-                
-                st.download_button(
-                    label=f"Download {len(table_data['downloaded_images'])} Images as ZIP",
-                    data=zip_buffer,
-                    file_name=zip_filename,
-                    mime="application/zip",
-                    use_container_width=True
-                )
-                
-            except Exception as zip_error:
-                st.error(f"Error creating image ZIP file: {zip_error}")
-    
-    # Option to download all tables as a zip with images
-    if len(st.session_state.extracted_tables) > 1:
-        st.markdown("---")
-        if st.button("Prepare ZIP file with all tables and images", use_container_width=True):
-            try:
-                import zipfile
-                from io import BytesIO
-                
-                # Create a BytesIO object to store the zip file
-                zip_buffer = BytesIO()
-                
-                # Create a ZipFile object
-                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                    # Add each table to the zip file
-                    for idx, table in enumerate(st.session_state.extracted_tables):
-                        filename = table['filename']
-                        content = table['content']
-                        
-                        # Add the content to the zip file
-                        zipf.writestr(filename, content)
-                        
-                        # If there's a version with local image paths, add it too
-                        if table.get("has_images") and "content_with_local_images" in table:
-                            local_img_filename = filename.replace(".", "_local_images.")
-                            zipf.writestr(local_img_filename, table['content_with_local_images'])
-                        
-                        # Add any screenshots for this table
-                        if "screenshot" in table and table["screenshot"] and os.path.exists(table["screenshot"]):
-                            screenshot_path = table["screenshot"]
-                            zipf.write(screenshot_path, f"screenshots/{os.path.basename(screenshot_path)}")
-                        
-                        # Add all downloaded images for this table
-                        if "downloaded_images" in table and table["downloaded_images"]:
-                            for img_path in table["downloaded_images"]:
-                                if os.path.exists(img_path):
-                                    zipf.write(img_path, f"images/{os.path.basename(img_path)}")
-                
-                # Prepare the download link for the zip file
-                zip_buffer.seek(0)
-                domain_name = re.sub(r'^https?://(www\.)?', '', url).split('/')[0]
-                safe_domain = re.sub(r'[^\w\s-]', '', domain_name).strip().replace('.', '_')
-                zip_filename = f"{safe_domain}_all_tables_with_images.zip"
-                
-                st.download_button(
-                    label=f"Download All Tables and Images as ZIP",
-                    data=zip_buffer,
-                    file_name=zip_filename,
-                    mime="application/zip",
-                    use_container_width=True
-                )
-            except Exception as zip_error:
-                st.error(f"Error creating ZIP file: {zip_error}")
-                with st.expander("See error details"):
-                    st.exception(zip_error)
-    
-    # --- Q&A Section ---
-    if ai_enabled:
-        st.markdown("---")
-        st.header("❓ Ask Questions About Your Table")
-        st.markdown("Uses the extracted text content for context.")
+                print("Using fallback strategy")
+                # Try to find any HTML table
+                tables = driver.find_elements(By.TAG_NAME, "table")
+                if tables:
+                    table_element = tables[0]
+                    print(f"Fallback: Using first HTML table (of {len(tables)})")
+                else:
+                    # Try to find any div that looks like a table
+                    table_like_divs = driver.find_elements(By.XPATH,
+                        "//div[contains(@class, 'table') or " +
+                        "contains(@class, 'standings') or " +
+                        "contains(@class, 'grid') or " +
+                        "contains(@class, 'data')]")
+                    if table_like_divs:
+                        table_element = table_like_divs[0]
+                        print(f"Fallback: Using first div-based table (of {len(table_like_divs)})")
+            except Exception as e:
+                print(f"Error in fallback strategy: {e}")
         
-        table_context_for_qa = table_data['content']
-        if table_context_for_qa:
-            col1, col2 = st.columns([4, 1])
-            with col1:
-                question = st.text_input("Your question:", key="table_question_input")
-            with col2:
-                submit_question = st.button("Ask Gemini", use_container_width=True, key="ask_button")
-            
-            if submit_question and question:
-                try:
-                    with st.spinner("🧠 Thinking..."):
-                        # Model should already be configured if ai_enabled is True
-                        model = genai.GenerativeModel('gemini-1.5-flash')
-                        qa_prompt = f"""Based *only* on the following table data, answer the user's question accurately. If the question cannot be answered from the provided data, state that clearly. Do not make up information.
-                        If the question is unrelated to the table or extracted data reply with "UNRELATED: Question unrelated to table, Please ask a question related to the table".
-                        Table Data ({table_data['format']} format):
-                        ```
-                        {table_context_for_qa}
-                        ```
-                        User Question: {question}
-                        Answer:"""
-                        
-                        response = model.generate_content(qa_prompt, request_options={"timeout": 60})
-                        answer = response.text.strip()
-                        
-                        if answer.startswith("UNRELATED:"):
-                            st.warning(answer.replace("UNRELATED: ", ""))
+        # If we still don't have a table element, take a screenshot of the whole page
+        if not table_element:
+            print("No table found. Taking screenshot of the entire page.")
+            os.makedirs('screenshots', exist_ok=True)
+            driver.save_screenshot("screenshots/full_page_screenshot.png")
+            print("Full page screenshot saved as screenshots/full_page_screenshot.png")
+            return
+        
+        # Scroll to the table element to make sure it's visible
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", table_element)
+        time.sleep(1)
+        
+        # Special handling for ESPN tables
+        if "espn.com" in url:
+            try:
+                print("Applying ESPN-specific table handling")
+                # For ESPN, we may need to find the parent container that holds the full table
+                # since ESPN often has separate containers for different parts of the table
+                espn_table_container = table_element
+                # Try to find a larger container by going up in the DOM
+                for _ in range(5):  # Try up to 5 levels up
+                    parent = driver.execute_script("return arguments[0].parentElement", espn_table_container)
+                    if parent:
+                        # Check if this parent is wider and contains the full table
+                        parent_size = driver.execute_script("return {width: arguments[0].offsetWidth, height: arguments[0].offsetHeight}", parent)
+                        current_size = driver.execute_script("return {width: arguments[0].offsetWidth, height: arguments[0].offsetHeight}", espn_table_container)
+                        # If parent is significantly wider, use it instead
+                        if parent_size['width'] > current_size['width'] * 1.3:  # 30% wider
+                            espn_table_container = parent
+                            print(f"Found wider parent container: {parent_size['width']}px vs {current_size['width']}px")
                         else:
-                            st.success(answer)
-                except Exception as e:
-                    st.error(f"An error occurred processing your question: {str(e)}")
-                    with st.expander("See error details"):
-                        st.exception(e)
-        else:
-            st.info("No extracted data available to ask questions about.")
+                            # If we didn't find a wider container, stop looking
+                            break
+                    else:
+                        break
+                # Check if we found a better container
+                if espn_table_container != table_element:
+                    table_element = espn_table_container
+                    print("Using wider container for ESPN table")
+                # Try to find specific standings table container class names
+                try:
+                    full_standings = driver.find_element(By.XPATH, "//div[contains(@class, 'ResponsiveTable') or contains(@class, 'Standings')]")
+                    if full_standings:
+                        table_element = full_standings
+                        print("Found ESPN ResponsiveTable/Standings container")
+                except:
+                    pass
+                # Find if there's a container with all the stats (the one with column headers)
+                try:
+                    headers = driver.find_elements(By.XPATH, "//tr[th[contains(text(), 'GP') or contains(text(), 'W') or contains(text(), 'L') or contains(text(), 'P')]]")
+                    if headers:
+                        # Find the closest table or div containing this header
+                        for header in headers:
+                            parent = header
+                            for _ in range(5):  # Look up to 5 levels up
+                                parent = driver.execute_script("return arguments[0].parentElement", parent)
+                                if parent and (parent.tag_name == 'table' or
+                                              ('table' in parent.get_attribute('class') or
+                                               'Table' in parent.get_attribute('class'))):
+                                    table_element = parent
+                                    print("Found table with proper headers (GP, W, L, P)")
+                                    break
+                except:
+                    pass
+            except Exception as e:
+                print(f"Error in ESPN-specific handling: {e}")
+        
+        # Ensure the table is fully visible (if possible)
+        try:
+            # Adjust the window size to be large enough
+            driver.set_window_size(2000, 1500)  # Use a larger window
+            # Check if table is larger than viewport and adjust accordingly
+            driver.execute_script("""
+                var rect = arguments[0].getBoundingClientRect();
+                if (rect.height > window.innerHeight) {
+                    window.scrollTo(0, window.pageYOffset + rect.top - 100);
+                }
+                // If there are horizontal scrollbars, try to capture the full width
+                if (rect.width > window.innerWidth) {
+                    arguments[0].style.maxWidth = "none";
+                    arguments[0].style.width = "auto";
+                }
+            """, table_element)
+            time.sleep(1)
+        except:
+            pass
+        
+        # Create a clean filename from the table title
+        safe_title = re.sub(r'[^\w\s-]', '', table_title).strip()
+        safe_title = re.sub(r'[-\s]+', '_', safe_title)
+        screenshot_filename = f"table_{safe_title}_screenshot.png"
+        
+        # For ESPN tables, try to ensure we get the full table by manipulating the page
+        if "espn.com" in url:
+            try:
+                # Try to make table fully visible by adjusting CSS
+                driver.execute_script("""
+                    // Force table to be fully visible and expanded
+                    arguments[0].style.overflow = 'visible';
+                    arguments[0].style.maxWidth = 'none';
+                    arguments[0].style.width = 'auto';
+                    // If there are any parent containers with overflow:hidden, fix them
+                    let parent = arguments[0].parentElement;
+                    for (let i = 0; i < 10 && parent; i++) {
+                        if (window.getComputedStyle(parent).overflow === 'hidden' ||
+                            window.getComputedStyle(parent).overflowX === 'hidden') {
+                            parent.style.overflow = 'visible';
+                            parent.style.overflowX = 'visible';
+                        }
+                        parent = parent.parentElement;
+                    }
+                    // If there are any parent containers with fixed width, expand them
+                    parent = arguments[0].parentElement;
+                    for (let i = 0; i < 10 && parent; i++) {
+                        if (window.getComputedStyle(parent).width !== 'auto') {
+                            parent.style.width = 'auto';
+                            parent.style.maxWidth = 'none';
+                        }
+                        parent = parent.parentElement;
+                    }
+                """, table_element)
+                # Wait for changes to apply
+                time.sleep(2)
+            except Exception as e:
+                print(f"Error adjusting table for ESPN: {e}")
+        
+        # Create screenshots directory if it doesn't exist
+        os.makedirs('screenshots', exist_ok=True)
+        
+        # Take the screenshot
+        try:
+            # First attempt: regular screenshot
+            table_element.screenshot(f"screenshots/{screenshot_filename}")
+            print(f"Table screenshot saved as screenshots/{screenshot_filename}")
+        except Exception as e:
+            print(f"Error taking screenshot: {e}")
+            # Fallback to a different approach if the first one fails
+            try:
+                # Try full page screenshot instead
+                driver.save_screenshot(f"screenshots/full_{screenshot_filename}")
+                print(f"Full page screenshot saved as screenshots/full_{screenshot_filename}")
+            except:
+                pass
+    
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        # Take screenshot of the entire page as a fallback
+        try:
+            os.makedirs('screenshots', exist_ok=True)
+            driver.save_screenshot("screenshots/error_screenshot.png")
+            print("Error occurred, full page screenshot saved as screenshots/error_screenshot.png")
+        except:
+            pass
+    
+    finally:
+        driver.quit()
